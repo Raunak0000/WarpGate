@@ -13,8 +13,8 @@
   - [ ] **Milestone:** Successfully run `terraform apply` and `terraform destroy`.
 
 - **Week 3: Configuration Management & Enhancements**
-  - [ ] **Automation:** Utilize Ansible with an AWS dynamic EC2 inventory to connect via SSH.
-  - [ ] **Ansible Roles:** Develop distinct roles for the base setup, kernel tuning, networking, WireGuard, AdGuard Home, and a systemd watchdog.
+  - [ ] **Member A - Core VPN Configuration:** Write the Ansible roles to install/configure WireGuard, and establish the NAT networking routing rules.
+  - [ ] **Member B - Enhancements & Automation:** Configure the AWS Dynamic EC2 Inventory, and write the Ansible roles for Linux kernel BBR tuning, AdGuard DNS, and the systemd watchdog.
   - [ ] **Milestone:** Achieve a fully automated flow from Terraform creation to Ansible configuration.
 
 ## Phase 2: Orchestration, Control Plane & Polish (Weeks 4-6)
@@ -39,10 +39,10 @@
 
 ## Team Division
 
-| **Domain** | **Partner A** | **Partner B** |
+| **Domain** | **Member A** | **Member B** |
 |---|---|---|
-| **Software Development** | Spring Boot API, PostgreSQL schema, REST controllers | Rust Orchestrator, Rust CLI (Clap), HTTP/JSON integration |
-| **Infrastructure & OS** | Terraform modules, AWS networking, Multi-region scaling | Ansible roles, Linux kernel tuning, AdGuard DNS setup |
-| **Security & VPN** | Checkov IaC scanning, IAM provisioning | WireGuard configuration, Key generation, NAT rules |
+| **Software Development** | Rust Orchestrator, Rust CLI (Clap), HTTP/JSON integration | Spring Boot API, PostgreSQL schema, REST controllers |
+| **Infrastructure & OS** | Terraform modules, AWS networking, Multi-region scaling | Ansible (Dynamic Inventory), Linux kernel tuning, AdGuard DNS setup |
+| **Security & VPN** | IAM provisioning, Ansible (WireGuard, NAT rules) | Checkov IaC scanning, Key generation |
 | **Testing & Lifecycle** | Terratest (Go) integration, TTL deployment states | Cargo tests, performance benchmarking, instance watchdog |
 | **Pipeline & Release** | Architecture documentation, API design | GitHub Actions CI/CD, Final demo script, Performance report |
