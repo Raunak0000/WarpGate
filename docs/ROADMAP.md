@@ -13,7 +13,7 @@
   - [ ] **Milestone:** Successfully run `terraform apply` and `terraform destroy`.
 
 - **Week 3: Configuration Management & Enhancements**
-  - [ ] **Member A - Core VPN Configuration:** Write the Ansible roles to install/configure WireGuard, and establish the NAT networking routing rules.
+  - [x] **Member A - Core VPN Configuration:** Write the Ansible roles to install/configure WireGuard, and establish the NAT networking routing rules.
   - [ ] **Member B - Enhancements & Automation:** Configure the AWS Dynamic EC2 Inventory, and write the Ansible roles for Linux kernel BBR tuning, AdGuard DNS, and the systemd watchdog.
   - [ ] **Milestone:** Achieve a fully automated flow from Terraform creation to Ansible configuration.
 
