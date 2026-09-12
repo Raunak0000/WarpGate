@@ -109,6 +109,10 @@ resource "aws_instance" "warpgate_node" {
 
   vpc_security_group_ids = [aws_security_group.warpgate_sg.id]
 
+  credit_specification {
+    cpu_credits = "standard"
+  }
+
   tags = {
     Name = "warpgate-node"
     Role = "vpn"
