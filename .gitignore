@@ -20,3 +20,4 @@ terraform.rc
 *.pem
 *.key
 *.pub
+hosts.ini
