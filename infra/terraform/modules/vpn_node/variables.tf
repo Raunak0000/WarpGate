@@ -9,3 +9,8 @@ variable "subnet_cidr" {
   type        = string
   default     = "10.0.1.0/24"
 }
+
+variable "admin_cidr" {
+  description = "CIDR block allowed to access the EC2 instance over SSH"
+  type        = string
+}

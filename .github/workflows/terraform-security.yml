@@ -1,0 +1,48 @@
+name: Terraform Security
+
+on:
+  push:
+    branches:
+      - main
+    paths:
+      - "infra/terraform/**"
+      - ".github/workflows/terraform-security.yml"
+
+  pull_request:
+    paths:
+      - "infra/terraform/**"
+      - ".github/workflows/terraform-security.yml"
+
+jobs:
+  terraform-security:
+    name: Terraform Security Checks
+    runs-on: ubuntu-latest
+
+    defaults:
+      run:
+        working-directory: infra/terraform
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Setup Terraform
+        uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: "1.16.2"
+
+      - name: Terraform Format Check
+        run: terraform fmt -check -recursive
+
+      - name: Terraform Init
+        run: terraform init -backend=false
+
+      - name: Terraform Validate
+        run: terraform validate
+
+      - name: Install Checkov
+        run: pip install checkov
+
+      - name: Checkov Security Scan
+        working-directory: .
+        run: checkov -d infra/terraform
