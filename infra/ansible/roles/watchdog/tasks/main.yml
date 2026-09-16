@@ -1,0 +1,31 @@
+---
+- name: Install systemd watchdog package
+  become: true
+  ansible.builtin.apt:
+    name: watchdog
+    state: present
+    update_cache: true
+
+- name: Enable watchdog kernel support
+  become: true
+  ansible.builtin.modprobe:
+    name: softdog
+    state: present
+
+- name: Configure watchdog
+  become: true
+  ansible.builtin.copy:
+    dest: /etc/watchdog.conf
+    mode: "0644"
+    content: |
+      watchdog-device = /dev/watchdog
+      watchdog-timeout = 15
+      max-load-1 = 24
+
+- name: Enable and start watchdog
+  become: true
+  ansible.builtin.systemd:
+    name: watchdog
+    enabled: true
+    state: started
+    daemon_reload: true

@@ -1,0 +1,34 @@
+---
+- name: Enable BBR congestion control
+  ansible.posix.sysctl:
+    name: net.ipv4.tcp_congestion_control
+    value: bbr
+    state: present
+    reload: true
+
+- name: Set FQ as the default TCP queue discipline
+  ansible.posix.sysctl:
+    name: net.core.default_qdisc
+    value: fq
+    state: present
+    reload: true
+
+- name: Check available TCP congestion control algorithms
+  ansible.builtin.command:
+    cmd: sysctl net.ipv4.tcp_available_congestion_control
+  register: tcp_congestion_control
+  changed_when: false
+
+- name: Display available congestion control algorithms
+  ansible.builtin.debug:
+    msg: "{{ tcp_congestion_control.stdout }}"
+
+- name: Verify active TCP congestion control
+  ansible.builtin.command:
+    cmd: sysctl net.ipv4.tcp_congestion_control
+  register: active_congestion_control
+  changed_when: false
+
+- name: Display active congestion control
+  ansible.builtin.debug:
+    msg: "{{ active_congestion_control.stdout }}"

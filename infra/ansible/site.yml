@@ -1,5 +1,9 @@
+---
 - name: Configure WarpGate VPN Nodes
   hosts: all
   become: yes
   roles:
     - wireguard
+    - bbr 
+    - adguard
+    - watchdog 
