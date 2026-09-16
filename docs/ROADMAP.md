@@ -9,8 +9,8 @@
 
 - **Week 2: Infrastructure as Code (IaC) & Security**
   - [x] **Partner A - Terraform Modules:** Build reproducible AWS infrastructure (VPC, public subnet, internet gateway, route table, security group, and EC2 instance).
-  - [ ] **Partner B - Security & CI/CD Initiation:** Integrate Checkov for static IaC security scanning and begin setting up GitHub Actions.
-  - [ ] **Milestone:** Successfully run `terraform apply` and `terraform destroy`.
+  - [x] **Partner B - Security & CI/CD Initiation:** Integrate Checkov for static IaC security scanning and begin setting up GitHub Actions.
+  - [x] **Milestone:** Successfully run `terraform apply` and `terraform destroy`.destroy`.
 
 - **Week 3: Configuration Management & Enhancements**
   - [x] **Member A - Core VPN Configuration:** Write the Ansible roles to install/configure WireGuard, and establish the NAT networking routing rules.
