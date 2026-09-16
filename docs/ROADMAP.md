@@ -14,8 +14,8 @@
 
 - **Week 3: Configuration Management & Enhancements**
   - [x] **Member A - Core VPN Configuration:** Write the Ansible roles to install/configure WireGuard, and establish the NAT networking routing rules.
-  - [ ] **Member B - Enhancements & Automation:** Configure the AWS Dynamic EC2 Inventory, and write the Ansible roles for Linux kernel BBR tuning, AdGuard DNS, and the systemd watchdog.
-  - [ ] **Milestone:** Achieve a fully automated flow from Terraform creation to Ansible configuration.
+  - [x] **Member B - Enhancements & Automation:** Configure the AWS Dynamic EC2 Inventory, and write the Ansible roles for Linux kernel BBR tuning, AdGuard DNS, and the systemd watchdog.
+  - [x] **Milestone:** Achieve a fully automated flow from Terraform creation to Ansible configuration.
 
 ## Phase 2: Orchestration, Control Plane & Polish (Weeks 4-6)
 
