@@ -20,3 +20,7 @@ terraform.rc
 *.key
 *.pub
 hosts.ini
+
+# Rust build artifacts
+target/
+**/target/
