@@ -1,0 +1,10 @@
+[package]
+name = "warpgate-orchestrator"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+warpgate-common = { path = "../warpgate-common" }
+axum = "0.8.9"
+serde_json = "1.0.151"
+tokio = { version = "1.53.1", features = ["full"] }

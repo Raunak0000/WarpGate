@@ -1,0 +1,7 @@
+[workspace]
+members = [
+    "crates/warpgate-common",
+    "crates/warpgate-orchestrator",
+    "crates/warpgate-cli",
+]
+resolver = "2"
