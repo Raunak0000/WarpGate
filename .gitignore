@@ -21,6 +21,5 @@ terraform.rc
 *.pub
 hosts.ini
 
-# Rust build artifacts
 target/
 **/target/
