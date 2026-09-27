@@ -10,7 +10,7 @@
 - **Week 2: Infrastructure as Code (IaC) & Security**
   - [x] **Partner A - Terraform Modules:** Build reproducible AWS infrastructure (VPC, public subnet, internet gateway, route table, security group, and EC2 instance).
   - [x] **Partner B - Security & CI/CD Initiation:** Integrate Checkov for static IaC security scanning and begin setting up GitHub Actions.
-  - [x] **Milestone:** Successfully run `terraform apply` and `terraform destroy`.destroy`.
+  - [x] **Milestone:** Successfully run `terraform apply` and `terraform destroy`.
 
 - **Week 3: Configuration Management & Enhancements**
   - [x] **Member A - Core VPN Configuration:** Write the Ansible roles to install/configure WireGuard, and establish the NAT networking routing rules.
@@ -20,9 +20,9 @@
 ## Phase 2: Orchestration, Control Plane & Polish (Weeks 4-6)
 
 - **Week 4: The Spring Boot & Rust Integration**
-  - [ ] **Contract Definition:** Agree on the JSON request/response structures between the Spring Boot API and the Rust Orchestrator.
+  - [x] **Contract Definition:** Agree on the JSON request/response structures between the Spring Boot API and the Rust Orchestrator.
   - [ ] **Control Plane (Java 21):** Develop the Spring Boot REST API (`/api/deployments`) backed by PostgreSQL.
-  - [ ] **Orchestration (Rust):** Build the async Rust engine to execute Terraform and Ansible via subprocesses.
+  - [x] **Orchestration (Rust):** Build the async Rust engine to execute Terraform and Ansible via subprocesses.
   - [ ] **Milestone:** Trigger an infrastructure deployment via a REST API call to Spring Boot, processed asynchronously by Rust.
 
 - **Week 5: CLI, Lifecycle Management, and Testing**
