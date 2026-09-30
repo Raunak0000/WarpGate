@@ -21,10 +21,10 @@
 
 - **Week 4: The Spring Boot & Rust Integration**
   - [x] **Contract Definition:** Agree on the JSON request/response structures between the Spring Boot API and the Rust Orchestrator.
-  - [ ] **Control Plane (Java 21):** Develop the Spring Boot REST API (`/api/deployments`) backed by PostgreSQL.
+  - [x] **Control Plane (Java 21):** Develop the Spring Boot REST API (`/api/deployments`) backed by PostgreSQL.
   - [x] **Orchestration (Rust):** Build the async Rust engine to execute Terraform and Ansible via subprocesses.
-  - [ ] **Milestone:** Trigger an infrastructure deployment via a REST API call to Spring Boot, processed asynchronously by Rust.
-
+  - [ ] **Milestone:** Trigger an infrastructure deployment via a REST API call to Spring Boot, processed asynchronously by Rust.  
+ 
 - **Week 5: CLI, Lifecycle Management, and Testing**
   - [ ] **User Interface:** Develop the Rust CLI using Clap (`warpgate up --region tokyo --ttl 30m`).
   - [ ] **Lifecycle Engine:** Implement the TTL automated teardown mechanism.

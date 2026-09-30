@@ -129,21 +129,58 @@ Initiates infrastructure teardown (`terraform destroy -auto-approve`).
 
 ```text
 WarpGate/
+│
+├── .github/
+│   └── workflows/
+│       └── terraform-security.yml
+│
 ├── backend/
 │   └── springboot/
 │       ├── src/
+│       │   ├── main/
+│       │   │   ├── java/
+│       │   │   │   └── com/
+│       │   │   │       └── warpgate/
+│       │   │   │           ├── controller/
+│       │   │   │           │   └── DeploymentController.java
+│       │   │   │           │
+│       │   │   │           ├── dto/
+│       │   │   │           │   └── DeploymentRequest.java
+│       │   │   │           │
+│       │   │   │           ├── model/
+│       │   │   │           │   └── Deployment.java
+│       │   │   │           │
+│       │   │   │           ├── repository/
+│       │   │   │           │   └── DeploymentRepository.java
+│       │   │   │           │
+│       │   │   │           ├── service/
+│       │   │   │           │   └── DeploymentService.java
+│       │   │   │           │
+│       │   │   │           └── WarpGateApplication.java
+│       │   │   │
+│       │   │   └── resources/
+│       │   │       └── application.properties
+│       │   │
+│       │   └── test/
+│       │       └── java/
+│       │           └── com/
+│       │               └── warpgate/
+│       │
 │       └── pom.xml
 │
 ├── rust/
 │   ├── Cargo.toml
+│   │
 │   └── crates/
 │       ├── warpgate-cli/
+│       │
 │       ├── warpgate-orchestrator/
 │       │   ├── src/
 │       │   │   ├── main.rs
 │       │   │   ├── terraform.rs
 │       │   │   └── ansible.rs
 │       │   └── Cargo.toml
+│       │
 │       └── warpgate-common/
 │           ├── src/
 │           │   └── lib.rs
@@ -152,27 +189,51 @@ WarpGate/
 ├── infra/
 │   ├── terraform/
 │   │   ├── main.tf
+│   │   ├── variables.tf
+│   │   ├── outputs.tf
+│   │   ├── providers.tf
+│   │   ├── terraform.tfvars
+│   │   ├── .terraform.lock.hcl
+│   │   │
 │   │   └── modules/
 │   │       └── vpn_node/
+│   │           ├── main.tf
+│   │           ├── variables.tf
+│   │           └── outputs.tf
 │   │
 │   └── ansible/
+│       ├── ansible.cfg
 │       ├── site.yml
+│       │
 │       ├── inventory/
+│       │   └── aws_ec2.yml
+│       │
 │       └── roles/
-│           ├── base/
-│           ├── kernel_tuning/
-│           ├── networking/
 │           ├── wireguard/
+│           │   ├── tasks/
+│           │   │   └── main.yml
+│           │   ├── handlers/
+│           │   │   └── main.yml
+│           │   └── templates/
+│           │       └── wg0.conf.j2
+│           │
+│           ├── bbr/
+│           │   └── tasks/
+│           │       └── main.yml
+│           │
+│           ├── adguard/
+│           │   └── tasks/
+│           │       └── main.yml
+│           │
 │           └── watchdog/
-│
-├── tests/
-│   ├── terratest/
-│   └── rust/
+│               └── tasks/
+│                   └── main.yml
 │
 ├── docs/
 │   ├── ARCHITECTURE.md
 │   ├── ROADMAP.md
 │   └── CAREER.md
 │
+├── .gitignore
+├── LICENSE
 └── README.md
-```
