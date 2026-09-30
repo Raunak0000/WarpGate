@@ -7,9 +7,9 @@ use axum::{
     http::StatusCode,
     routing::{get, post},
 };
-use std::collections::HashMap;
 use std::net::SocketAddr;
 use std::sync::Arc;
+use std::{collections::HashMap, matches};
 use tokio::sync::RwLock;
 use tracing::{error, info};
 use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt};
@@ -134,6 +134,56 @@ async fn run_deployment_pipeline(state: AppState, req: DeploymentRequest) {
         }
     }
     info!("Deployment {} successfully provisioned and configured!", id);
+
+    let ttl_minutes = req.ttl_minutes;
+    let auto_state = Arc::clone(&state);
+    let auto_id = id.clone();
+    let auto_region = req.region.clone();
+    let auto_admin_cidr = admin_cidr.to_string();
+
+    tokio::spawn(async move {
+        info!(
+            "TTL timer started for {} ({} minutes)",
+            auto_id, ttl_minutes
+        );
+        tokio::time::sleep(tokio::time::Duration::from_secs(ttl_minutes as u64 * 60)).await;
+
+        let should_destroy = {
+            let store = auto_state.read().await;
+            matches!(
+                store.get(&auto_id).map(|d| &d.status),
+                Some(DeploymentStatus::Ready)
+            )
+        };
+
+        if should_destroy {
+            info!(
+                "TTL expired for deployment {}. Initiating automated teardown...",
+                auto_id
+            );
+            {
+                let mut store = auto_state.write().await;
+                if let Some(entry) = store.get_mut(&auto_id) {
+                    entry.status = DeploymentStatus::Terminating;
+                }
+            }
+            let res = terraform::run_destroy(&auto_region, &auto_admin_cidr).await;
+            let mut store = auto_state.write().await;
+            if let Some(entry) = store.get_mut(&auto_id) {
+                match res {
+                    Ok(_) => {
+                        info!("Automated TTL teardown completed for {}", auto_id);
+                        entry.status = DeploymentStatus::Destroyed;
+                    }
+                    Err(e) => {
+                        error!("Automated TTL teardown FAILED for {}: {}", auto_id, e);
+                        entry.status = DeploymentStatus::Failed;
+                        entry.error_message = Some(format!("TTL teardown failed: {}", e));
+                    }
+                }
+            }
+        }
+    });
 }
 
 async fn update_failed(state: &AppState, id: &str, err_msg: String) {
