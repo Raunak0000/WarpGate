@@ -26,8 +26,8 @@
   - [ ] **Milestone:** Trigger an infrastructure deployment via a REST API call to Spring Boot, processed asynchronously by Rust.  
  
 - **Week 5: CLI, Lifecycle Management, and Testing**
-  - [ ] **User Interface:** Develop the Rust CLI using Clap (`warpgate up --region tokyo --ttl 30m`).
-  - [ ] **Lifecycle Engine:** Implement the TTL automated teardown mechanism.
+  - [x] **User Interface:** Develop the Rust CLI using Clap (`warpgate up --region tokyo --ttl 30m`).
+  - [x] **Lifecycle Engine:** Implement the TTL automated teardown mechanism.
   - [ ] **Testing Suite:** Write Rust tests and deploy Terratest (Go) to validate end-to-end infrastructure.
 
 - **Week 6: Scaling & Performance Benchmarking**

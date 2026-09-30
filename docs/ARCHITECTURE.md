@@ -2,19 +2,27 @@
 
 ## System Overview
 
-WarpGate relies on three distinct layers to provide an ephemeral, on-demand VPN service:
+WarpGate is architected into four distinct layers providing an end-to-end ephemeral, on-demand VPN service:
 
-1. **Control Plane (Spring Boot / Java 21)**
-   - Manages deployments, users, status tracking, and TTL lifecycles.
-   - Provides a REST API (`/api/deployments`) and stores metadata in PostgreSQL.
+1. **Client / User Interface Layer (`warpgate-cli` in Rust)**
+   - Fast terminal CLI built with Clap (`up`, `status`, `down`).
+   - Automatically generates client-side Curve25519/X25519 WireGuard keypairs on the fly (`x25519-dalek`) so private keys never leave the user's computer.
+   - Live polling indicators displaying provisioning progress (`[1/2] Provisioning AWS Infra` ➔ `[2/2] Configuring WireGuard & BBR` ➔ `Ready`).
+   - Renders 2D Unicode QR codes directly in the terminal (`qrcode`) for instant mobile device scanning, and optionally exports `wg0.conf` configuration files.
 
-2. **Orchestration Plane (Rust)**
-   - Executes the actual deployment workflow using asynchronous background jobs (Tokio).
-   - Manages local processes for Terraform and Ansible, acting as the bridge between the API and the infrastructure.
+2. **Control Plane (Spring Boot / Java 21)**
+   - Enterprise record-keeping and business logic layer.
+   - Persists deployment records, target regions, TTL expiration timestamps, and status states in a relational PostgreSQL database via Spring Data JPA.
+   - Exposes REST endpoints (`/api/deployments`) for clients, web dashboards, and audit logs.
 
-3. **Data Plane (WireGuard + Ubuntu + AWS)**
-   - The physical network layer that encrypts and carries the user's internet traffic.
-   - Enhanced with BBR kernel tuning and AdGuard Home for DNS sinkholing.
+3. **Orchestration Plane (Rust `warpgate-orchestrator`)**
+   - High-performance, zero-overhead asynchronous systems engine powered by Tokio.
+   - Manages asynchronous child processes for `terraform apply`, JSON output extraction, SSH socket polling (`TcpStream`), `ansible-playbook` execution, and `terraform destroy`.
+   - **TTL Automated Teardown Engine**: Background Tokio timers that track deployment lifecycles and automatically trigger `terraform destroy` when Time-to-Live expires.
+
+4. **Data Plane (WireGuard + Ubuntu 22.04 + AWS)**
+   - The hardened network layer that securely routes and encrypts all outbound Internet traffic.
+   - Enhanced with Linux kernel BBR TCP congestion control, AdGuard Home DNS sinkholing, and systemd watchdog auto-shutdown.
 
 ## Diagram
 
@@ -173,6 +181,9 @@ WarpGate/
 │   │
 │   └── crates/
 │       ├── warpgate-cli/
+│       │   ├── src/
+│       │   │   └── main.rs
+│       │   └── Cargo.toml
 │       │
 │       ├── warpgate-orchestrator/
 │       │   ├── src/
