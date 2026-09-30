@@ -30,6 +30,8 @@ cargo run --bin warpgate-cli -- down <deployment-id>
 
 When the node is ready, the CLI generates a terminal QR code for instant mobile WireGuard scanning.
 
+## Contributing
+
 Feel free to open an issue or a PR.
 
 ## License
