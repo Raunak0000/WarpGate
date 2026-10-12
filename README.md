@@ -18,17 +18,20 @@ The orchestrator starts on `http://localhost:3000`, handling asynchronous Terraf
 
 ### 2. Connect via the CLI
 ```bash
-# Provision a temporary VPN node with a 30-minute TTL
-cargo run --bin warpgate-cli -- up --region us-east-1 --ttl 30m
+# Provision a temporary VPN node and automatically connect your laptop
+# (Defaults: region=us-east-1, ttl=30m, auto-connect=true)
+cargo run --bin warpgate-cli -- up
 
 # Check status of an active deployment
 cargo run --bin warpgate-cli -- status <deployment-id>
 
-# Teardown a deployment immediately
+# Teardown a deployment immediately (and disconnect local laptop VPN)
 cargo run --bin warpgate-cli -- down <deployment-id>
 ```
 
-When the node is ready, the CLI generates a terminal QR code for instant mobile WireGuard scanning.
+When the node is ready, the CLI automatically configures and connects your Linux laptop to the tunnel (and also renders a terminal QR code if you want to scan with a mobile device). To skip auto-connecting the laptop, pass `--no-connect`.
+
+
 
 ## Contributing
 

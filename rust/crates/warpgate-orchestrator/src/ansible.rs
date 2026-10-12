@@ -51,8 +51,10 @@ pub async fn run_playbook(public_ip: &str, client_public_key: &str) -> Result<()
         public_ip, ansible_dir
     );
 
-    let home = std::env::var("HOME").unwrap_or_default();
-    let warpgate_key = format!("{}/.ssh/warpgate_key", home);
+    let warpgate_key = std::env::var("WARPGATE_SSH_KEY").unwrap_or_else(|_| {
+        let home = std::env::var("HOME").unwrap_or_default();
+        format!("{}/.ssh/warpgate_key", home)
+    });
 
     let mut cmd = Command::new("ansible-playbook");
     cmd.env("ANSIBLE_HOST_KEY_CHECKING", "False");

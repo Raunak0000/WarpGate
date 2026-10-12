@@ -97,3 +97,49 @@ pub async fn run_destroy(region: &str, admin_cidr: &str) -> Result<(), String> {
         Err(err)
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_parse_terraform_outputs() {
+        let sample_json = r#"{
+            "instance_id": {
+                "sensitive": false,
+                "type": "string",
+                "value": "i-0123456789abcdef0"
+            },
+            "public_ip": {
+                "sensitive": false,
+                "type": "string",
+                "value": "54.210.12.34"
+            },
+            "private_ip": {
+                "sensitive": false,
+                "type": "string",
+                "value": "10.0.1.50"
+            },
+            "region": {
+                "sensitive": false,
+                "type": "string",
+                "value": "us-east-1"
+            }
+        }"#;
+
+        let parsed: TerraformOutputs =
+            serde_json::from_str(sample_json).expect("Failed to deserialize terraform outputs");
+
+        assert_eq!(parsed.instance_id.value, "i-0123456789abcdef0");
+        assert_eq!(parsed.public_ip.value, "54.210.12.34");
+        assert_eq!(
+            parsed.private_ip.map(|p| p.value),
+            Some("10.0.1.50".to_string())
+        );
+        assert_eq!(
+            parsed.region.map(|r| r.value),
+            Some("us-east-1".to_string())
+        );
+    }
+}
+

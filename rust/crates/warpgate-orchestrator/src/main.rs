@@ -30,18 +30,21 @@ async fn main() {
         .init();
 
     let state: AppState = Arc::new(RwLock::new(HashMap::new()));
-
-    let app = Router::new()
-        .route("/api/deployments", post(create_deployment))
-        .route("/api/deployments/{id}", get(get_deployment))
-        .route("/api/deployments/{id}/teardown", post(teardown_deployment))
-        .with_state(state);
+    let app = create_app(state);
 
     let addr = SocketAddr::from(([0, 0, 0, 0], 3000));
     info!("WarpGate Orchestrator listening on {}", addr);
 
     let listener = tokio::net::TcpListener::bind(addr).await.unwrap();
     axum::serve(listener, app).await.unwrap();
+}
+
+pub fn create_app(state: AppState) -> Router {
+    Router::new()
+        .route("/api/deployments", post(create_deployment))
+        .route("/api/deployments/{id}", get(get_deployment))
+        .route("/api/deployments/{id}/teardown", post(teardown_deployment))
+        .with_state(state)
 }
 
 async fn create_deployment(
@@ -51,6 +54,9 @@ async fn create_deployment(
     let deployment_id = payload.deployment_id.clone();
     info!("Received deployment request for ID: {}", deployment_id);
 
+    let dns = std::env::var("WARPGATE_DNS_SERVER")
+        .unwrap_or_else(|_| "1.1.1.1, 10.200.0.1".to_string());
+
     let initial_response = DeploymentResponse {
         deployment_id: deployment_id.clone(),
         status: DeploymentStatus::ProvisioningInfra,
@@ -58,7 +64,7 @@ async fn create_deployment(
         wireguard_port: Some(51820),
         server_public_key: None,
         client_ip: Some("10.200.0.2/32".to_string()),
-        dns_server: Some("10.200.0.1".to_string()),
+        dns_server: Some(dns),
         error_message: None,
     };
 
@@ -76,9 +82,22 @@ async fn create_deployment(
     (StatusCode::ACCEPTED, Json(initial_response))
 }
 
+
 async fn run_deployment_pipeline(state: AppState, req: DeploymentRequest) {
     let id = req.deployment_id.clone();
     let admin_cidr = req.admin_cidr.as_deref().unwrap_or("0.0.0.0/0");
+
+    if std::env::var("WARPGATE_DRY_RUN").is_ok() {
+        info!("WARPGATE_DRY_RUN: Simulating successful pipeline for {}", id);
+        let mut store = state.write().await;
+        if let Some(entry) = store.get_mut(&id) {
+            entry.status = DeploymentStatus::Ready;
+            entry.server_ip = Some("127.0.0.1".to_string());
+            entry.server_public_key =
+                Some("M0pTVJqVNONA94wmPZCeNGDnEKSDXvu+yXEqtvqpp1I=".to_string());
+        }
+        return;
+    }
 
     // Run Terraform Apply
     if let Err(e) = terraform::run_apply(&req.region, admin_cidr).await {
@@ -223,6 +242,14 @@ async fn teardown_deployment(
     let task_state = Arc::clone(&state);
     let task_id = id.clone();
     tokio::spawn(async move {
+        if std::env::var("WARPGATE_DRY_RUN").is_ok() {
+            let mut store = task_state.write().await;
+            if let Some(entry) = store.get_mut(&task_id) {
+                entry.status = DeploymentStatus::Destroyed;
+            }
+            return;
+        }
+
         // Run terraform destroy
         let res = terraform::run_destroy(&payload.region, "0.0.0.0/0").await;
         let mut store = task_state.write().await;
@@ -243,3 +270,115 @@ async fn teardown_deployment(
         message: "Teardown initiated".to_string(),
     }))
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use axum::body::Body;
+    use axum::http::{Request, StatusCode};
+    use http_body_util::BodyExt;
+    use tower::ServiceExt;
+
+    #[tokio::test]
+    async fn test_create_and_get_deployment() {
+        let state: AppState = Arc::new(RwLock::new(HashMap::new()));
+        let app = create_app(state);
+
+        let req_payload = serde_json::to_vec(&DeploymentRequest {
+            deployment_id: "warp-test-1".to_string(),
+            region: "us-east-1".to_string(),
+            ttl_minutes: 5,
+            client_public_key: "dummy_client_key".to_string(),
+            admin_cidr: Some("0.0.0.0/0".to_string()),
+        })
+        .unwrap();
+
+        // 1. POST /api/deployments
+        let response = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/deployments")
+                    .header("content-type", "application/json")
+                    .body(Body::from(req_payload))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::ACCEPTED);
+        let body_bytes = response.into_body().collect().await.unwrap().to_bytes();
+        let dep: DeploymentResponse = serde_json::from_slice(&body_bytes).unwrap();
+        assert_eq!(dep.deployment_id, "warp-test-1");
+        assert_eq!(dep.status, DeploymentStatus::ProvisioningInfra);
+
+        // 2. GET /api/deployments/warp-test-1
+        let get_response = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("GET")
+                    .uri("/api/deployments/warp-test-1")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(get_response.status(), StatusCode::OK);
+        let get_bytes = get_response.into_body().collect().await.unwrap().to_bytes();
+        let get_dep: DeploymentResponse = serde_json::from_slice(&get_bytes).unwrap();
+        assert_eq!(get_dep.deployment_id, "warp-test-1");
+    }
+
+    #[tokio::test]
+    async fn test_get_deployment_not_found() {
+        let state: AppState = Arc::new(RwLock::new(HashMap::new()));
+        let app = create_app(state);
+
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method("GET")
+                    .uri("/api/deployments/nonexistent-id")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::NOT_FOUND);
+    }
+
+    #[tokio::test]
+    async fn test_teardown_endpoint() {
+        let state: AppState = Arc::new(RwLock::new(HashMap::new()));
+        let app = create_app(state);
+
+        let teardown_payload = serde_json::to_vec(&TeardownRequest {
+            deployment_id: "warp-test-td".to_string(),
+            region: "us-east-1".to_string(),
+        })
+        .unwrap();
+
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/deployments/warp-test-td/teardown")
+                    .header("content-type", "application/json")
+                    .body(Body::from(teardown_payload))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::OK);
+        let body_bytes = response.into_body().collect().await.unwrap().to_bytes();
+        let td_resp: TeardownResponse = serde_json::from_slice(&body_bytes).unwrap();
+        assert_eq!(td_resp.deployment_id, "warp-test-td");
+        assert_eq!(td_resp.status, DeploymentStatus::Terminating);
+    }
+}
+

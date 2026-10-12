@@ -43,6 +43,14 @@ enum Commands {
         /// Save client WireGuard configuration file to this path
         #[arg(short, long)]
         output: Option<PathBuf>,
+
+        /// Connect this laptop to the WireGuard VPN tunnel upon readiness (default: true)
+        #[arg(short, long, default_value_t = true)]
+        connect: bool,
+
+        /// Skip automatically connecting this laptop to the VPN tunnel
+        #[arg(long)]
+        no_connect: bool,
     },
 
     /// Check status of an active deployment
@@ -59,6 +67,10 @@ enum Commands {
         /// AWS region where node was deployed
         #[arg(short, long, default_value = "us-east-1")]
         region: String,
+
+        /// Disconnect local host VPN connection if active
+        #[arg(long, default_value_t = true)]
+        disconnect: bool,
     },
 }
 
@@ -73,9 +85,13 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             ttl,
             admin_cidr,
             output,
+            connect,
+            no_connect,
         } => {
+            let should_connect = connect && !no_connect;
             let ttl_minutes = parse_ttl_minutes(&ttl)?;
             let deployment_id = format!("warp-{}", &uuid_short());
+
 
             // 1. Generate client WireGuard keypair locally
             let (client_priv, client_pub) = generate_wireguard_keypair();
@@ -138,6 +154,47 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                         DeploymentStatus::Ready => {
                             println!("\nWarpGate node is READY!\n");
                             display_connection_info(&dep, &client_priv, output.as_deref());
+
+                            if should_connect {
+                                let conf_path = output.clone().unwrap_or_else(|| {
+                                    std::env::temp_dir().join("warpgate.conf")
+                                });
+
+                                let conf = generate_wireguard_config(
+                                    &client_priv,
+                                    dep.client_ip.as_deref().unwrap_or("10.200.0.2/32"),
+                                    dep.dns_server.as_deref().unwrap_or("1.1.1.1, 10.200.0.1"),
+                                    dep.server_public_key.as_deref().unwrap_or(""),
+                                    dep.server_ip.as_deref().unwrap_or("0.0.0.0"),
+                                    dep.wireguard_port.unwrap_or(51820),
+                                );
+                                let _ = std::fs::write(&conf_path, &conf);
+
+                                println!("\n[--connect] Connecting laptop to WarpGate VPN via NetworkManager...");
+                                match connect_local_vpn(&conf_path, "warpgate") {
+                                    Ok(_) => {
+                                        println!("SUCCESS: Laptop connected to WarpGate VPN! (Interface: warpgate)");
+                                        if let Ok(ip_res) = client
+                                            .get("https://api.ipify.org")
+                                            .timeout(Duration::from_secs(4))
+                                            .send()
+                                            .await
+                                        {
+                                            if let Ok(ip_text) = ip_res.text().await {
+                                                println!("Verified laptop public IP is now: {}", ip_text.trim());
+                                            }
+                                        }
+                                    }
+                                    Err(e) => {
+                                        eprintln!("Warning: Failed to auto-connect laptop: {}", e);
+                                        println!(
+                                            "You can connect manually via: nmcli connection import type wireguard file {:?}",
+                                            conf_path
+                                        );
+                                    }
+                                }
+                            }
+
                             break;
                         }
                         DeploymentStatus::Failed => {
@@ -169,7 +226,15 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             println!("{:#?}", dep);
         }
 
-        Commands::Down { id, region } => {
+        Commands::Down {
+            id,
+            region,
+            disconnect,
+        } => {
+            if disconnect {
+                disconnect_local_vpn("warpgate");
+            }
+
             println!("Terminating deployment '{}' in region '{}'...", id, region);
             let req_body = TeardownRequest {
                 deployment_id: id.clone(),
@@ -193,6 +258,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             }
         }
     }
+
 
     Ok(())
 }
@@ -228,18 +294,15 @@ fn uuid_short() -> String {
     format!("{:06x}", r & 0xffffff)
 }
 
-fn display_connection_info(
-    dep: &DeploymentResponse,
+pub fn generate_wireguard_config(
     client_priv: &str,
-    output_path: Option<&std::path::Path>,
-) {
-    let server_ip = dep.server_ip.as_deref().unwrap_or("0.0.0.0");
-    let port = dep.wireguard_port.unwrap_or(51820);
-    let server_pub = dep.server_public_key.as_deref().unwrap_or("");
-    let client_ip = dep.client_ip.as_deref().unwrap_or("10.200.0.2/32");
-    let dns = dep.dns_server.as_deref().unwrap_or("10.200.0.1");
-
-    let conf = format!(
+    client_ip: &str,
+    dns: &str,
+    server_pub: &str,
+    server_ip: &str,
+    port: u16,
+) -> String {
+    format!(
         "[Interface]
 PrivateKey = {client_priv}
 Address = {client_ip}
@@ -251,7 +314,21 @@ Endpoint = {server_ip}:{port}
 AllowedIPs = 0.0.0.0/0, ::/0
 PersistentKeepalive = 25
 "
-    );
+    )
+}
+
+fn display_connection_info(
+    dep: &DeploymentResponse,
+    client_priv: &str,
+    output_path: Option<&std::path::Path>,
+) {
+    let server_ip = dep.server_ip.as_deref().unwrap_or("0.0.0.0");
+    let port = dep.wireguard_port.unwrap_or(51820);
+    let server_pub = dep.server_public_key.as_deref().unwrap_or("");
+    let client_ip = dep.client_ip.as_deref().unwrap_or("10.200.0.2/32");
+    let dns = dep.dns_server.as_deref().unwrap_or("1.1.1.1, 10.200.0.1");
+
+    let conf = generate_wireguard_config(client_priv, client_ip, dns, server_pub, server_ip, port);
 
     println!("===========================================================");
     println!(" Server IP   : {server_ip}:{port}");
@@ -277,3 +354,230 @@ PersistentKeepalive = 25
         }
     }
 }
+
+pub fn connect_local_vpn(conf_path: &std::path::Path, conn_name: &str) -> Result<(), String> {
+    // 1. Try NetworkManager (nmcli)
+    let nmcli_check = std::process::Command::new("which").arg("nmcli").output();
+    if let Ok(out) = nmcli_check {
+        if out.status.success() {
+            // Delete pre-existing profile if exists to prevent duplicates
+            let _ = std::process::Command::new("nmcli")
+                .args(["connection", "delete", conn_name])
+                .output();
+
+            let import_status = std::process::Command::new("nmcli")
+                .args(["connection", "import", "type", "wireguard", "file"])
+                .arg(conf_path)
+                .status()
+                .map_err(|e| format!("Failed to run nmcli import: {}", e))?;
+
+            if !import_status.success() {
+                return Err(format!("nmcli import failed with status: {}", import_status));
+            }
+
+            let up_status = std::process::Command::new("nmcli")
+                .args(["connection", "up", conn_name])
+                .status()
+                .map_err(|e| format!("Failed to run nmcli up: {}", e))?;
+
+            if up_status.success() {
+                return Ok(());
+            } else {
+                let _ = std::process::Command::new("nmcli")
+                    .args(["connection", "delete", conn_name])
+                    .output();
+                return Err(format!(
+                    "nmcli up failed with status: {}. (If you recently updated your Linux kernel, a reboot is required to load the new WireGuard module)",
+                    up_status
+                ));
+            }
+
+        }
+    }
+
+    // 2. Fallback to wg-quick
+    let wg_check = std::process::Command::new("which").arg("wg-quick").output();
+    if let Ok(out) = wg_check {
+        if out.status.success() {
+            let _ = std::process::Command::new("wg-quick")
+                .arg("down")
+                .arg(conf_path)
+                .output();
+
+            let up_status = std::process::Command::new("wg-quick")
+                .arg("up")
+                .arg(conf_path)
+                .status()
+                .map_err(|e| format!("Failed to run wg-quick up: {}", e))?;
+
+            if up_status.success() {
+                return Ok(());
+            } else {
+                return Err(format!("wg-quick up failed with status: {}", up_status));
+            }
+        }
+    }
+
+    Err("Neither 'nmcli' nor 'wg-quick' was found on your system.".to_string())
+}
+
+pub fn disconnect_local_vpn(conn_name: &str) {
+    let _ = std::process::Command::new("nmcli")
+        .args(["connection", "down", conn_name])
+        .output();
+    let _ = std::process::Command::new("nmcli")
+        .args(["connection", "delete", conn_name])
+        .output();
+
+    let default_conf = std::env::temp_dir().join(format!("{}.conf", conn_name));
+    if default_conf.exists() {
+        let _ = std::process::Command::new("wg-quick")
+            .arg("down")
+            .arg(&default_conf)
+            .output();
+        let _ = std::fs::remove_file(&default_conf);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use clap::Parser;
+
+    #[test]
+    fn test_parse_ttl_minutes() {
+        assert_eq!(parse_ttl_minutes("30m").unwrap(), 30);
+        assert_eq!(parse_ttl_minutes("2m").unwrap(), 2);
+        assert_eq!(parse_ttl_minutes("1h").unwrap(), 60);
+        assert_eq!(parse_ttl_minutes("2h").unwrap(), 120);
+        assert_eq!(parse_ttl_minutes("45").unwrap(), 45);
+        assert_eq!(parse_ttl_minutes(" 10m ").unwrap(), 10);
+
+        assert!(parse_ttl_minutes("invalid").is_err());
+        assert!(parse_ttl_minutes("").is_err());
+        assert!(parse_ttl_minutes("-5m").is_err());
+    }
+
+    #[test]
+    fn test_generate_wireguard_keypair() {
+        let (priv_b64, pub_b64) = generate_wireguard_keypair();
+        assert!(!priv_b64.is_empty());
+        assert!(!pub_b64.is_empty());
+
+        let priv_bytes = BASE64_STANDARD.decode(&priv_b64).expect("valid base64");
+        let pub_bytes = BASE64_STANDARD.decode(&pub_b64).expect("valid base64");
+
+        assert_eq!(priv_bytes.len(), 32);
+        assert_eq!(pub_bytes.len(), 32);
+        assert_ne!(priv_b64, pub_b64);
+    }
+
+    #[test]
+    fn test_generate_wireguard_config() {
+        let conf = generate_wireguard_config(
+            "dummy_priv_key",
+            "10.200.0.2/32",
+            "1.1.1.1, 10.200.0.1",
+            "dummy_pub_key",
+            "54.12.34.56",
+            51820,
+        );
+
+        assert!(conf.contains("PrivateKey = dummy_priv_key"));
+        assert!(conf.contains("Address = 10.200.0.2/32"));
+        assert!(conf.contains("DNS = 1.1.1.1, 10.200.0.1"));
+        assert!(conf.contains("PublicKey = dummy_pub_key"));
+        assert!(conf.contains("Endpoint = 54.12.34.56:51820"));
+        assert!(conf.contains("AllowedIPs = 0.0.0.0/0, ::/0"));
+        assert!(conf.contains("PersistentKeepalive = 25"));
+    }
+
+    #[test]
+    fn test_uuid_short() {
+        let id1 = uuid_short();
+        let id2 = uuid_short();
+        assert_eq!(id1.len(), 6);
+        assert_eq!(id2.len(), 6);
+        assert!(u32::from_str_radix(&id1, 16).is_ok());
+    }
+
+    #[test]
+    fn test_cli_parsing_up_defaults() {
+        let cli = Cli::try_parse_from(["warpgate", "up"]).unwrap();
+
+        match cli.command {
+            Commands::Up {
+                region,
+                ttl,
+                output,
+                connect,
+                no_connect,
+                ..
+            } => {
+                assert_eq!(region, "us-east-1");
+                assert_eq!(ttl, "30m");
+                assert!(output.is_none());
+                assert!(connect);
+                assert!(!no_connect);
+            }
+            _ => panic!("Expected Up command"),
+        }
+    }
+
+    #[test]
+    fn test_cli_parsing_up_custom() {
+        let cli = Cli::try_parse_from([
+            "warpgate", "up", "--region", "eu-central-1", "--ttl", "15m", "--no-connect",
+        ])
+        .unwrap();
+
+        match cli.command {
+            Commands::Up {
+                region,
+                ttl,
+                connect,
+                no_connect,
+                ..
+            } => {
+                assert_eq!(region, "eu-central-1");
+                assert_eq!(ttl, "15m");
+                assert!(connect);
+                assert!(no_connect);
+            }
+            _ => panic!("Expected Up command"),
+        }
+    }
+
+    #[test]
+    fn test_cli_parsing_down() {
+        let cli = Cli::try_parse_from(["warpgate", "down", "warp-998877", "--region", "us-west-2"])
+            .unwrap();
+
+        match cli.command {
+            Commands::Down {
+                id,
+                region,
+                disconnect,
+            } => {
+                assert_eq!(id, "warp-998877");
+                assert_eq!(region, "us-west-2");
+                assert!(disconnect);
+            }
+            _ => panic!("Expected Down command"),
+        }
+    }
+
+    #[test]
+    fn test_cli_parsing_status() {
+        let cli = Cli::try_parse_from(["warpgate", "status", "warp-112233"]).unwrap();
+
+        match cli.command {
+            Commands::Status { id } => {
+                assert_eq!(id, "warp-112233");
+            }
+            _ => panic!("Expected Status command"),
+        }
+    }
+}
+
+
