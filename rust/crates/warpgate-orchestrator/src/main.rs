@@ -11,7 +11,7 @@ use std::net::SocketAddr;
 use std::sync::Arc;
 use std::{collections::HashMap, matches};
 use tokio::sync::RwLock;
-use tracing::{error, info};
+use tracing::{error, info, warn};
 use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt};
 use warpgate_common::{
     DeploymentRequest, DeploymentResponse, DeploymentStatus, TeardownRequest, TeardownResponse,
@@ -86,16 +86,23 @@ async fn create_deployment(
 async fn run_deployment_pipeline(state: AppState, req: DeploymentRequest) {
     let id = req.deployment_id.clone();
     let admin_cidr = req.admin_cidr.as_deref().unwrap_or("0.0.0.0/0");
+        // Safe integration test: never invokes Terraform or Ansible.
+    if std::env::var("WARPGATE_DRY_RUN").as_deref() == Ok("1")
+        || std::env::var("WARPGATE_DRY_RUN").is_ok()
+    {
+        info!("Dry run enabled for deployment {}", id);
 
-    if std::env::var("WARPGATE_DRY_RUN").is_ok() {
-        info!("WARPGATE_DRY_RUN: Simulating successful pipeline for {}", id);
         let mut store = state.write().await;
         if let Some(entry) = store.get_mut(&id) {
             entry.status = DeploymentStatus::Ready;
-            entry.server_ip = Some("127.0.0.1".to_string());
+            entry.server_ip = Some("203.0.113.10".to_string());
             entry.server_public_key =
                 Some("M0pTVJqVNONA94wmPZCeNGDnEKSDXvu+yXEqtvqpp1I=".to_string());
+            entry.error_message = Some(
+                "DRY RUN: simulated deployment; no AWS resources created".to_string(),
+            );
         }
+
         return;
     }
 
@@ -142,14 +149,24 @@ async fn run_deployment_pipeline(state: AppState, req: DeploymentRequest) {
         return;
     }
 
+    // Retrieve WireGuard public key from server (or fallback)
+    let server_pub_key = match ansible::get_server_public_key(&server_ip).await {
+        Ok(key) => key,
+        Err(e) => {
+            warn!(
+                "Failed to retrieve dynamic public key: {}. Falling back to default key.",
+                e
+            );
+            "M0pTVJqVNONA94wmPZCeNGDnEKSDXvu+yXEqtvqpp1I=".to_string()
+        }
+    };
+
     // Mark Ready
     {
         let mut store = state.write().await;
         if let Some(entry) = store.get_mut(&id) {
             entry.status = DeploymentStatus::Ready;
-            // The real server public key corresponding to wg0.conf.j2 private key
-            entry.server_public_key =
-                Some("M0pTVJqVNONA94wmPZCeNGDnEKSDXvu+yXEqtvqpp1I=".to_string());
+            entry.server_public_key = Some(server_pub_key);
         }
     }
     info!("Deployment {} successfully provisioned and configured!", id);

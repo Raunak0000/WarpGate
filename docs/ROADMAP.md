@@ -23,7 +23,7 @@
   - [x] **Contract Definition:** Agree on the JSON request/response structures between the Spring Boot API and the Rust Orchestrator.
   - [x] **Control Plane (Java 21):** Develop the Spring Boot REST API (`/api/deployments`) backed by PostgreSQL.
   - [x] **Orchestration (Rust):** Build the async Rust engine to execute Terraform and Ansible via subprocesses.
-  - [ ] **Milestone:** Trigger an infrastructure deployment via a REST API call to Spring Boot, processed asynchronously by Rust.  
+  - [x] **Milestone:** Trigger an infrastructure deployment via a REST API call to Spring Boot, processed asynchronously by Rust.  
  
 - **Week 5: CLI, Lifecycle Management, and Testing**
   - [x] **User Interface:** Develop the Rust CLI using Clap (`warpgate up --region tokyo --ttl 30m`).

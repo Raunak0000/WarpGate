@@ -106,7 +106,7 @@ resource "aws_security_group" "warpgate_sg" {
 # SSH Key Pair
 resource "aws_key_pair" "warpgate_key" {
   key_name   = "warpgate-key"
-  public_key = "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIOfFNypsgLNoYhhTmLgWNne8hBnQKPUJ5wanjnXu7FD8 warpgate-admin"
+  public_key = file(pathexpand("~/.ssh/warpgate_key.pub"))
 }
 
 # AMI Lookup (Ubuntu 22.04)

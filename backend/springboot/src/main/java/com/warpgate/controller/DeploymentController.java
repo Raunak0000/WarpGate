@@ -2,6 +2,7 @@ package com.warpgate.controller;
 
 import java.util.List;
 
+import org.springframework.http.HttpStatus;
 import org.springframework.http.ResponseEntity;
 import org.springframework.web.bind.annotation.GetMapping;
 import org.springframework.web.bind.annotation.PathVariable;
@@ -10,6 +11,7 @@ import org.springframework.web.bind.annotation.RequestBody;
 import org.springframework.web.bind.annotation.RequestMapping;
 import org.springframework.web.bind.annotation.RestController;
 
+import com.fasterxml.jackson.databind.JsonNode;
 import com.warpgate.dto.DeploymentRequest;
 import com.warpgate.model.Deployment;
 import com.warpgate.service.DeploymentService;
@@ -27,24 +29,33 @@ public class DeploymentController {
     }
 
     @PostMapping
-    public ResponseEntity<Deployment> createDeployment(
+    public ResponseEntity<JsonNode> createDeployment(
             @Valid @RequestBody DeploymentRequest request) {
 
-        return ResponseEntity.ok(
-                deploymentService.createDeployment(request));
+        JsonNode response = deploymentService.createDeployment(request);
+
+        return ResponseEntity.status(HttpStatus.ACCEPTED).body(response);
     }
 
     @GetMapping
     public ResponseEntity<List<Deployment>> getDeployments() {
-        return ResponseEntity.ok(
-                deploymentService.getAllDeployments());
+        return ResponseEntity.ok(deploymentService.getAllDeployments());
     }
 
     @GetMapping("/{id}")
-    public ResponseEntity<Deployment> getDeployment(
-            @PathVariable Long id) {
+    public ResponseEntity<JsonNode> getDeployment(
+            @PathVariable String id) {
 
         return ResponseEntity.ok(
                 deploymentService.getDeployment(id));
+    }
+
+    @PostMapping("/{id}/teardown")
+    public ResponseEntity<JsonNode> teardownDeployment(
+            @PathVariable String id,
+            @RequestBody JsonNode payload) {
+
+        return ResponseEntity.ok(
+                deploymentService.teardownDeployment(id, payload));
     }
 }

@@ -11,6 +11,9 @@ public class Deployment {
     @GeneratedValue(strategy = GenerationType.IDENTITY)
     private Long id;
 
+    @Column(name = "deployment_id")
+    private String deploymentId;
+
     @Column(nullable = false)
     private String region;
 
@@ -37,8 +40,26 @@ public class Deployment {
         this.expiresAt = expiresAt;
     }
 
+    public Deployment(String deploymentId, String region, String status, Integer ttlMinutes,
+            LocalDateTime createdAt, LocalDateTime expiresAt) {
+        this.deploymentId = deploymentId;
+        this.region = region;
+        this.status = status;
+        this.ttlMinutes = ttlMinutes;
+        this.createdAt = createdAt;
+        this.expiresAt = expiresAt;
+    }
+
     public Long getId() {
         return id;
+    }
+
+    public String getDeploymentId() {
+        return deploymentId;
+    }
+
+    public void setDeploymentId(String deploymentId) {
+        this.deploymentId = deploymentId;
     }
 
     public String getRegion() {

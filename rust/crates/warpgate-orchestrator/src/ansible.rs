@@ -87,3 +87,46 @@ pub async fn run_playbook(public_ip: &str, client_public_key: &str) -> Result<()
         Err(err)
     }
 }
+
+/// Retrieves the WireGuard server's public key over SSH.
+pub async fn get_server_public_key(public_ip: &str) -> Result<String, String> {
+    let warpgate_key = std::env::var("WARPGATE_SSH_KEY").unwrap_or_else(|_| {
+        let home = std::env::var("HOME").unwrap_or_default();
+        format!("{}/.ssh/warpgate_key", home)
+    });
+
+    let mut cmd = Command::new("ssh");
+    cmd.arg("-o")
+        .arg("BatchMode=yes")
+        .arg("-o")
+        .arg("StrictHostKeyChecking=accept-new")
+        .arg("-o")
+        .arg("ConnectTimeout=10");
+
+    if std::path::Path::new(&warpgate_key).exists() {
+        cmd.arg("-i").arg(&warpgate_key);
+    }
+
+    cmd.arg(format!("ubuntu@{}", public_ip))
+        .arg("sudo wg show wg0 public-key");
+
+    let output = cmd
+        .output()
+        .await
+        .map_err(|e| format!("Failed to execute SSH: {}", e))?;
+
+    if !output.status.success() {
+        return Err(format!(
+            "Failed to retrieve WireGuard public key: {}",
+            String::from_utf8_lossy(&output.stderr)
+        ));
+    }
+
+    let key = String::from_utf8_lossy(&output.stdout).trim().to_string();
+
+    if key.is_empty() {
+        return Err("WireGuard server public key was empty".to_string());
+    }
+
+    Ok(key)
+}
