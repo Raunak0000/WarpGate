@@ -20,3 +20,8 @@ variable "admin_cidr" {
   description = "CIDR block allowed to access the EC2 instance over SSH"
   type        = string
 }
+
+variable "ssh_public_key" {
+  description = "SSH public key used to access the VPN instance"
+  type        = string
+}
