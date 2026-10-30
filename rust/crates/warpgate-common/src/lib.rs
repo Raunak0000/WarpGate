@@ -31,6 +31,8 @@ pub struct DeploymentResponse {
     pub client_ip: Option<String>,
     pub dns_server: Option<String>,
     pub error_message: Option<String>,
+    pub region: String,
+    pub admin_cidr: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -132,6 +134,8 @@ mod tests {
             client_ip: Some("10.200.0.2/32".to_string()),
             dns_server: Some("1.1.1.1, 10.200.0.1".to_string()),
             error_message: None,
+            region: "us-east-1".to_string(),
+            admin_cidr: "1.2.3.4/32".to_string(),
         };
 
         let json_str = serde_json::to_string(&resp).unwrap();
@@ -141,6 +145,8 @@ mod tests {
         assert_eq!(parsed.status, DeploymentStatus::Ready);
         assert_eq!(parsed.server_ip.as_deref(), Some("54.123.45.67"));
         assert_eq!(parsed.wireguard_port, Some(51820));
+        assert_eq!(parsed.region, "us-east-1");
+        assert_eq!(parsed.admin_cidr, "1.2.3.4/32");
         assert!(parsed.error_message.is_none());
     }
 
@@ -150,8 +156,10 @@ mod tests {
             deployment_id: "warp-abc".to_string(),
             region: "us-west-2".to_string(),
         };
+
         let req_json = serde_json::to_string(&req).unwrap();
         let req_parsed: TeardownRequest = serde_json::from_str(&req_json).unwrap();
+
         assert_eq!(req_parsed.deployment_id, "warp-abc");
 
         let resp = TeardownResponse {
@@ -159,9 +167,10 @@ mod tests {
             status: DeploymentStatus::Terminating,
             message: "Teardown initiated".to_string(),
         };
+
         let resp_json = serde_json::to_string(&resp).unwrap();
         let resp_parsed: TeardownResponse = serde_json::from_str(&resp_json).unwrap();
+
         assert_eq!(resp_parsed.status, DeploymentStatus::Terminating);
     }
 }
-

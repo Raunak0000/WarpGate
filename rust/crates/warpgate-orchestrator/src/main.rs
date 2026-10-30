@@ -7,9 +7,10 @@ use axum::{
     http::StatusCode,
     routing::{get, post},
 };
+use std::collections::HashMap;
 use std::net::SocketAddr;
 use std::sync::Arc;
-use std::{collections::HashMap, matches};
+use std::time::Duration;
 use tokio::sync::RwLock;
 use tracing::{error, info, warn};
 use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt};
@@ -52,10 +53,28 @@ async fn create_deployment(
     Json(payload): Json<DeploymentRequest>,
 ) -> (StatusCode, Json<DeploymentResponse>) {
     let deployment_id = payload.deployment_id.clone();
+
     info!("Received deployment request for ID: {}", deployment_id);
 
-    let dns = std::env::var("WARPGATE_DNS_SERVER")
-        .unwrap_or_else(|_| "1.1.1.1, 10.200.0.1".to_string());
+    let Some(admin_cidr) = payload.admin_cidr.clone() else {
+        let response = DeploymentResponse {
+            deployment_id,
+            status: DeploymentStatus::Failed,
+            server_ip: None,
+            wireguard_port: None,
+            server_public_key: None,
+            client_ip: None,
+            dns_server: None,
+            error_message: Some("admin_cidr is required".to_string()),
+            region: payload.region,
+            admin_cidr: String::new(),
+        };
+
+        return (StatusCode::BAD_REQUEST, Json(response));
+    };
+
+    let dns =
+        std::env::var("WARPGATE_DNS_SERVER").unwrap_or_else(|_| "1.1.1.1, 10.200.0.1".to_string());
 
     let initial_response = DeploymentResponse {
         deployment_id: deployment_id.clone(),
@@ -66,6 +85,8 @@ async fn create_deployment(
         client_ip: Some("10.200.0.2/32".to_string()),
         dns_server: Some(dns),
         error_message: None,
+        region: payload.region.clone(),
+        admin_cidr,
     };
 
     {
@@ -73,8 +94,8 @@ async fn create_deployment(
         store.insert(deployment_id.clone(), initial_response.clone());
     }
 
-    // Spawn async background provisioning workflow
     let task_state = Arc::clone(&state);
+
     tokio::spawn(async move {
         run_deployment_pipeline(task_state, payload).await;
     });
@@ -82,26 +103,37 @@ async fn create_deployment(
     (StatusCode::ACCEPTED, Json(initial_response))
 }
 
-
 async fn run_deployment_pipeline(state: AppState, req: DeploymentRequest) {
     let id = req.deployment_id.clone();
-    let admin_cidr = req.admin_cidr.as_deref().unwrap_or("0.0.0.0/0");
-        // Safe integration test: never invokes Terraform or Ansible.
-    if std::env::var("WARPGATE_DRY_RUN").as_deref() == Ok("1")
-        || std::env::var("WARPGATE_DRY_RUN").is_ok()
-    {
+    let admin_cidr = req
+        .admin_cidr
+        .as_deref()
+        .expect("admin_cidr must be validated before provisioning");
+    // Safe integration test: never invokes Terraform or Ansible.
+    if std::env::var("WARPGATE_DRY_RUN").as_deref() == Ok("1") {
         info!("Dry run enabled for deployment {}", id);
 
-        let mut store = state.write().await;
-        if let Some(entry) = store.get_mut(&id) {
-            entry.status = DeploymentStatus::Ready;
-            entry.server_ip = Some("203.0.113.10".to_string());
-            entry.server_public_key =
-                Some("M0pTVJqVNONA94wmPZCeNGDnEKSDXvu+yXEqtvqpp1I=".to_string());
-            entry.error_message = Some(
-                "DRY RUN: simulated deployment; no AWS resources created".to_string(),
-            );
+        {
+            let mut store = state.write().await;
+
+            if let Some(entry) = store.get_mut(&id) {
+                entry.status = DeploymentStatus::Ready;
+                entry.server_ip = Some("203.0.113.10".to_string());
+                entry.server_public_key =
+                    Some("M0pTVJqVNONA94wmPZCeNGDnEKSDXvu+yXEqtvqpp1I=".to_string());
+                entry.error_message =
+                    Some("DRY RUN: simulated deployment; no AWS resources created".to_string());
+            }
         }
+
+        schedule_ttl_teardown(
+            Arc::clone(&state),
+            id.clone(),
+            req.region.clone(),
+            admin_cidr.to_string(),
+            Duration::from_secs(req.ttl_minutes as u64 * 60),
+            true,
+        );
 
         return;
     }
@@ -171,55 +203,98 @@ async fn run_deployment_pipeline(state: AppState, req: DeploymentRequest) {
     }
     info!("Deployment {} successfully provisioned and configured!", id);
 
-    let ttl_minutes = req.ttl_minutes;
-    let auto_state = Arc::clone(&state);
-    let auto_id = id.clone();
-    let auto_region = req.region.clone();
-    let auto_admin_cidr = admin_cidr.to_string();
+    schedule_ttl_teardown(
+        Arc::clone(&state),
+        id.clone(),
+        req.region.clone(),
+        admin_cidr.to_string(),
+        Duration::from_secs(req.ttl_minutes as u64 * 60),
+        false,
+    );
+}
 
+fn schedule_ttl_teardown(
+    state: AppState,
+    id: String,
+    region: String,
+    admin_cidr: String,
+    ttl: Duration,
+    dry_run: bool,
+) {
     tokio::spawn(async move {
-        info!(
-            "TTL timer started for {} ({} minutes)",
-            auto_id, ttl_minutes
-        );
-        tokio::time::sleep(tokio::time::Duration::from_secs(ttl_minutes as u64 * 60)).await;
+        info!("TTL timer started for {} ({:?})", id, ttl);
 
+        tokio::time::sleep(ttl).await;
+
+        // Atomically claim the deployment for teardown.
         let should_destroy = {
-            let store = auto_state.read().await;
-            matches!(
-                store.get(&auto_id).map(|d| &d.status),
-                Some(DeploymentStatus::Ready)
-            )
+            let mut store = state.write().await;
+
+            match store.get_mut(&id) {
+                Some(entry) if entry.status == DeploymentStatus::Ready => {
+                    entry.status = DeploymentStatus::Terminating;
+                    true
+                }
+                _ => false,
+            }
         };
 
-        if should_destroy {
+        if !should_destroy {
             info!(
-                "TTL expired for deployment {}. Initiating automated teardown...",
-                auto_id
+                "Skipping TTL teardown for {} because it is no longer READY",
+                id
             );
-            {
-                let mut store = auto_state.write().await;
-                if let Some(entry) = store.get_mut(&auto_id) {
-                    entry.status = DeploymentStatus::Terminating;
+            return;
+        }
+
+        let result = if dry_run {
+            info!("DRY RUN: simulated TTL teardown for {}", id);
+            Ok(())
+        } else {
+            terraform::run_destroy(&region, &admin_cidr).await
+        };
+
+        finish_teardown(&state, &id, result).await;
+
+        match terraform::run_destroy(&region, &admin_cidr).await {
+            Ok(_) => {
+                info!("TTL teardown completed for {}", id);
+
+                let mut store = state.write().await;
+
+                if let Some(entry) = store.get_mut(&id) {
+                    entry.status = DeploymentStatus::Destroyed;
                 }
             }
-            let res = terraform::run_destroy(&auto_region, &auto_admin_cidr).await;
-            let mut store = auto_state.write().await;
-            if let Some(entry) = store.get_mut(&auto_id) {
-                match res {
-                    Ok(_) => {
-                        info!("Automated TTL teardown completed for {}", auto_id);
-                        entry.status = DeploymentStatus::Destroyed;
-                    }
-                    Err(e) => {
-                        error!("Automated TTL teardown FAILED for {}: {}", auto_id, e);
-                        entry.status = DeploymentStatus::Failed;
-                        entry.error_message = Some(format!("TTL teardown failed: {}", e));
-                    }
+            Err(e) => {
+                error!("TTL teardown failed for {}: {}", id, e);
+
+                let mut store = state.write().await;
+
+                if let Some(entry) = store.get_mut(&id) {
+                    entry.status = DeploymentStatus::Failed;
+                    entry.error_message = Some(format!("TTL teardown failed: {}", e));
                 }
             }
         }
     });
+}
+
+async fn finish_teardown(state: &AppState, id: &str, result: Result<(), String>) {
+    let mut store = state.write().await;
+
+    if let Some(entry) = store.get_mut(id) {
+        match result {
+            Ok(()) => {
+                entry.status = DeploymentStatus::Destroyed;
+                entry.error_message = None;
+            }
+            Err(e) => {
+                entry.status = DeploymentStatus::Failed;
+                entry.error_message = Some(format!("Teardown failed: {}", e));
+            }
+        }
+    }
 }
 
 async fn update_failed(state: &AppState, id: &str, err_msg: String) {
@@ -245,37 +320,49 @@ async fn get_deployment(
 async fn teardown_deployment(
     State(state): State<AppState>,
     Path(id): Path<String>,
-    Json(payload): Json<TeardownRequest>,
+    Json(_payload): Json<TeardownRequest>,
 ) -> Result<Json<TeardownResponse>, StatusCode> {
     info!("Received teardown request for deployment {}", id);
 
-    {
+    // Atomically claim the deployment for teardown and retrieve
+    // the original infrastructure configuration.
+    let (region, admin_cidr) = {
         let mut store = state.write().await;
-        if let Some(entry) = store.get_mut(&id) {
-            entry.status = DeploymentStatus::Terminating;
+
+        let entry = store.get_mut(&id).ok_or(StatusCode::NOT_FOUND)?;
+
+        if entry.status != DeploymentStatus::Ready {
+            return Err(StatusCode::CONFLICT);
         }
-    }
+
+        entry.status = DeploymentStatus::Terminating;
+
+        (entry.region.clone(), entry.admin_cidr.clone())
+    };
 
     let task_state = Arc::clone(&state);
     let task_id = id.clone();
-    tokio::spawn(async move {
-        if std::env::var("WARPGATE_DRY_RUN").is_ok() {
-            let mut store = task_state.write().await;
-            if let Some(entry) = store.get_mut(&task_id) {
-                entry.status = DeploymentStatus::Destroyed;
-            }
-            return;
-        }
 
-        // Run terraform destroy
-        let res = terraform::run_destroy(&payload.region, "0.0.0.0/0").await;
+    tokio::spawn(async move {
+        let result = if std::env::var("WARPGATE_DRY_RUN").as_deref() == Ok("1") {
+            info!("Dry-run teardown for deployment {}", task_id);
+            Ok(())
+        } else {
+            terraform::run_destroy(&region, &admin_cidr).await
+        };
+
         let mut store = task_state.write().await;
+
         if let Some(entry) = store.get_mut(&task_id) {
-            match res {
-                Ok(_) => entry.status = DeploymentStatus::Destroyed,
+            match result {
+                Ok(_) => {
+                    entry.status = DeploymentStatus::Destroyed;
+                    info!("Deployment {} successfully destroyed", task_id);
+                }
                 Err(e) => {
                     entry.status = DeploymentStatus::Failed;
                     entry.error_message = Some(format!("Teardown failed: {}", e));
+                    error!("Teardown failed for {}: {}", task_id, e);
                 }
             }
         }
@@ -371,7 +458,26 @@ mod tests {
     #[tokio::test]
     async fn test_teardown_endpoint() {
         let state: AppState = Arc::new(RwLock::new(HashMap::new()));
-        let app = create_app(state);
+
+        let deployment = DeploymentResponse {
+            deployment_id: "warp-test-td".to_string(),
+            status: DeploymentStatus::Ready,
+            server_ip: Some("203.0.113.10".to_string()),
+            wireguard_port: Some(51820),
+            server_public_key: None,
+            client_ip: Some("10.200.0.2/32".to_string()),
+            dns_server: Some("1.1.1.1".to_string()),
+            error_message: None,
+            region: "us-east-1".to_string(),
+            admin_cidr: "192.168.1.10/32".to_string(),
+        };
+
+        state
+            .write()
+            .await
+            .insert("warp-test-td".to_string(), deployment);
+
+        let app = create_app(Arc::clone(&state));
 
         let teardown_payload = serde_json::to_vec(&TeardownRequest {
             deployment_id: "warp-test-td".to_string(),
@@ -392,10 +498,185 @@ mod tests {
             .unwrap();
 
         assert_eq!(response.status(), StatusCode::OK);
+
         let body_bytes = response.into_body().collect().await.unwrap().to_bytes();
         let td_resp: TeardownResponse = serde_json::from_slice(&body_bytes).unwrap();
+
         assert_eq!(td_resp.deployment_id, "warp-test-td");
         assert_eq!(td_resp.status, DeploymentStatus::Terminating);
     }
-}
 
+    fn create_test_deployment(id: &str, status: DeploymentStatus) -> DeploymentResponse {
+        DeploymentResponse {
+            deployment_id: id.to_string(),
+            status,
+            server_ip: Some("203.0.113.10".to_string()),
+            wireguard_port: Some(51820),
+            server_public_key: None,
+            client_ip: Some("10.200.0.2/32".to_string()),
+            dns_server: Some("1.1.1.1".to_string()),
+            error_message: None,
+            region: "us-east-1".to_string(),
+            admin_cidr: "192.168.1.10/32".to_string(),
+        }
+    }
+
+    #[tokio::test]
+    async fn test_ttl_expiry_dry_run_destroys_deployment() {
+        let state: AppState = Arc::new(RwLock::new(HashMap::new()));
+
+        state.write().await.insert(
+            "ttl-test-1".to_string(),
+            create_test_deployment("ttl-test-1", DeploymentStatus::Ready),
+        );
+
+        schedule_ttl_teardown(
+            Arc::clone(&state),
+            "ttl-test-1".to_string(),
+            "us-east-1".to_string(),
+            "192.168.1.10/32".to_string(),
+            Duration::from_millis(10),
+            true,
+        );
+
+        tokio::time::sleep(Duration::from_millis(100)).await;
+
+        let store = state.read().await;
+        assert_eq!(
+            store.get("ttl-test-1").unwrap().status,
+            DeploymentStatus::Destroyed
+        );
+    }
+
+    #[tokio::test]
+    async fn test_ttl_skips_non_ready_deployment() {
+        let state: AppState = Arc::new(RwLock::new(HashMap::new()));
+
+        state.write().await.insert(
+            "ttl-test-2".to_string(),
+            create_test_deployment("ttl-test-2", DeploymentStatus::Terminating),
+        );
+
+        schedule_ttl_teardown(
+            Arc::clone(&state),
+            "ttl-test-2".to_string(),
+            "us-east-1".to_string(),
+            "192.168.1.10/32".to_string(),
+            Duration::from_millis(10),
+            true,
+        );
+
+        tokio::time::sleep(Duration::from_millis(100)).await;
+
+        let store = state.read().await;
+        assert_eq!(
+            store.get("ttl-test-2").unwrap().status,
+            DeploymentStatus::Terminating
+        );
+    }
+
+    #[tokio::test]
+    async fn test_ttl_teardown_success() {
+        let state: AppState = Arc::new(RwLock::new(HashMap::new()));
+
+        state.write().await.insert(
+            "ttl-success".to_string(),
+            create_test_deployment("ttl-success", DeploymentStatus::Terminating),
+        );
+
+        finish_teardown(&state, "ttl-success", Ok(())).await;
+
+        let store = state.read().await;
+        assert_eq!(
+            store.get("ttl-success").unwrap().status,
+            DeploymentStatus::Destroyed
+        );
+    }
+
+    #[tokio::test]
+    async fn test_ttl_teardown_failure() {
+        let state: AppState = Arc::new(RwLock::new(HashMap::new()));
+
+        state.write().await.insert(
+            "ttl-failure".to_string(),
+            create_test_deployment("ttl-failure", DeploymentStatus::Terminating),
+        );
+
+        finish_teardown(
+            &state,
+            "ttl-failure",
+            Err("Simulated Terraform failure".to_string()),
+        )
+        .await;
+
+        let store = state.read().await;
+        let deployment = store.get("ttl-failure").unwrap();
+
+        assert_eq!(deployment.status, DeploymentStatus::Failed);
+        assert!(
+            deployment
+                .error_message
+                .as_deref()
+                .unwrap()
+                .contains("Simulated Terraform failure")
+        );
+    }
+
+    #[tokio::test]
+    async fn test_teardown_nonexistent_deployment() {
+        let state: AppState = Arc::new(RwLock::new(HashMap::new()));
+        let app = create_app(state);
+
+        let payload = serde_json::to_vec(&TeardownRequest {
+            deployment_id: "missing".to_string(),
+            region: "us-east-1".to_string(),
+        })
+        .unwrap();
+
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/deployments/missing/teardown")
+                    .header("content-type", "application/json")
+                    .body(Body::from(payload))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::NOT_FOUND);
+    }
+
+    #[tokio::test]
+    async fn test_teardown_already_terminating() {
+        let state: AppState = Arc::new(RwLock::new(HashMap::new()));
+
+        state.write().await.insert(
+            "already-terminating".to_string(),
+            create_test_deployment("already-terminating", DeploymentStatus::Terminating),
+        );
+
+        let app = create_app(Arc::clone(&state));
+
+        let payload = serde_json::to_vec(&TeardownRequest {
+            deployment_id: "already-terminating".to_string(),
+            region: "us-east-1".to_string(),
+        })
+        .unwrap();
+
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/deployments/already-terminating/teardown")
+                    .header("content-type", "application/json")
+                    .body(Body::from(payload))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::CONFLICT);
+    }
+}

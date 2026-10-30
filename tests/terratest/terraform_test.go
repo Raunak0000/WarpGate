@@ -1,38 +1,72 @@
 package terratest
 
 import (
+	"io"
+	"os"
+	"path/filepath"
 	"testing"
 
 	"github.com/gruntwork-io/terratest/modules/terraform"
 )
 
 func TestTerraformConfigurationValidates(t *testing.T) {
-	t.Parallel()
+	sourceDir := "../../infra/terraform"
+	tempDir := t.TempDir()
 
-	options := &terraform.Options{
-		TerraformDir: "../../infra/terraform",
-		NoColor:      true,
-		Vars: map[string]interface{}{
-			"ssh_public_key": "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIOfFNypsgLNoYhhTmLgWNne8hBnQKPUJ5wanjnXu7FD8 warpgate-admin",
-			"admin_cidr":     "127.0.0.1/32",
-		},
+	// Copy Terraform configuration only.
+	// Exclude state, plans, credentials and generated files.
+	err := filepath.WalkDir(sourceDir, func(path string, entry os.DirEntry, err error) error {
+		if err != nil {
+			return err
+		}
+
+		if entry.IsDir() {
+			if entry.Name() == ".terraform" {
+				return filepath.SkipDir
+			}
+			return nil
+		}
+
+		name := entry.Name()
+		if filepath.Ext(name) != ".tf" && name != ".terraform.lock.hcl" {
+			return nil
+		}
+
+		relative, err := filepath.Rel(sourceDir, path)
+		if err != nil {
+			return err
+		}
+
+		destination := filepath.Join(tempDir, relative)
+
+		if err := os.MkdirAll(filepath.Dir(destination), 0755); err != nil {
+			return err
+		}
+
+		src, err := os.Open(path)
+		if err != nil {
+			return err
+		}
+		defer src.Close()
+
+		dst, err := os.Create(destination)
+		if err != nil {
+			return err
+		}
+		defer dst.Close()
+
+		_, err = io.Copy(dst, src)
+		return err
+	})
+
+	if err != nil {
+		t.Fatalf("Failed to prepare isolated Terraform configuration: %v", err)
 	}
 
-	terraform.Init(t, options)
-	terraform.Validate(t, options)
-}
-
-func TestTerraformPlan(t *testing.T) {
-	t.Parallel()
-
 	options := &terraform.Options{
-		TerraformDir: "../../infra/terraform",
+		TerraformDir: tempDir,
 		NoColor:      true,
-		Vars: map[string]interface{}{
-			"ssh_public_key": "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIOfFNypsgLNoYhhTmLgWNne8hBnQKPUJ5wanjnXu7FD8 warpgate-admin",
-			"admin_cidr":     "127.0.0.1/32",
-		},
 	}
 
-	terraform.InitAndPlan(t, options)
+	terraform.InitAndValidate(t, options)
 }

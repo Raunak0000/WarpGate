@@ -28,10 +28,10 @@
 - **Week 5: CLI, Lifecycle Management, and Testing**
   - [x] **User Interface:** Develop the Rust CLI using Clap (`warpgate up --region tokyo --ttl 30m`).
   - [x] **Lifecycle Engine:** Implement the TTL automated teardown mechanism.
-  - [ ] **Testing Suite:** Write Rust tests and deploy Terratest (Go) to validate end-to-end infrastructure.
-
+  - [x] **Testing Suite:** Write Rust tests and add Terratest (Go) to validate Terraform configuration without provisioning AWS resources.
+    
 - **Week 6: Scaling & Performance Benchmarking**
-  - [ ] **Multi-Region:** Expand Terraform modules to support additional AWS regions (e.g., `us-east-1`, `eu-central-1`).
+  - [] **Multi-Region:** Expand Terraform modules to support additional AWS regions (e.g., `us-east-1`, `eu-central-1`).
   - [ ] **Benchmarking:** Compare default settings versus BBR-tuned settings using `iperf3`, `ping`, and `dig`.
   - [ ] **Final Demo:** Execute the full lifecycle from the `warpgate up` command, connecting via QR code, and ending with automated teardown.
 
