@@ -163,7 +163,7 @@ resource "aws_iam_instance_profile" "warpgate_profile" {
 
 # EC2 Instance
 resource "aws_instance" "warpgate_node" {
-  ami           = data.aws_ami.ubuntu.id
+  ami           = "ami-062944a84867f2386"
   instance_type = "t3.micro"
   subnet_id     = aws_subnet.warpgate_subnet.id
 

@@ -6,3 +6,4 @@ module "vpn_node" {
   admin_cidr     = var.admin_cidr
   ssh_public_key = var.ssh_public_key
 }
+ 
