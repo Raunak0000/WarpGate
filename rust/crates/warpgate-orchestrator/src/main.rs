@@ -256,27 +256,7 @@ fn schedule_ttl_teardown(
 
         finish_teardown(&state, &id, result).await;
 
-        match terraform::run_destroy(&region, &admin_cidr).await {
-            Ok(_) => {
-                info!("TTL teardown completed for {}", id);
-
-                let mut store = state.write().await;
-
-                if let Some(entry) = store.get_mut(&id) {
-                    entry.status = DeploymentStatus::Destroyed;
-                }
-            }
-            Err(e) => {
-                error!("TTL teardown failed for {}: {}", id, e);
-
-                let mut store = state.write().await;
-
-                if let Some(entry) = store.get_mut(&id) {
-                    entry.status = DeploymentStatus::Failed;
-                    entry.error_message = Some(format!("TTL teardown failed: {}", e));
-                }
-            }
-        }
+        info!("TTL teardown processing completed for {}", id);
     });
 }
 

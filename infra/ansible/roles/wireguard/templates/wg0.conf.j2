@@ -1,11 +1,11 @@
 [Interface]
 Address = 10.200.0.1/24
 ListenPort = 51820
-PrivateKey = mIW+aF/O4r5B0M5+W8o3M9j7j8c3p2v/J4H0w7u+bFE=
+PrivateKey = {{ wireguard_server_private_key_value }}
 
 PostUp = iptables -A FORWARD -i wg0 -j ACCEPT; iptables -t nat -A POSTROUTING -o {{ ansible_facts['default_ipv4']['interface'] }} -j MASQUERADE
 PostDown = iptables -D FORWARD -i wg0 -j ACCEPT; iptables -t nat -D POSTROUTING -o {{ ansible_facts['default_ipv4']['interface'] }} -j MASQUERADE
 
 [Peer]
-PublicKey = {{ wireguard_client_public_key | default('xI1sB28L/a8k5u1e8w1V9/z6y3u3u5l2p5x3h4v4wHE=') }}
+PublicKey = {{ wireguard_client_public_key }}
 AllowedIPs = 10.200.0.2/32
