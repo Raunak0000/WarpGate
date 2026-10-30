@@ -37,7 +37,7 @@ enum Commands {
         ttl: String,
 
         /// Allowed admin CIDR for SSH access
-        #[arg(long, default_value = "0.0.0.0/0")]
+        #[arg(long, required = true)]
         admin_cidr: String,
 
         /// Save client WireGuard configuration file to this path
@@ -91,7 +91,6 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             let should_connect = connect && !no_connect;
             let ttl_minutes = parse_ttl_minutes(&ttl)?;
             let deployment_id = format!("warp-{}", &uuid_short());
-
 
             // 1. Generate client WireGuard keypair locally
             let (client_priv, client_pub) = generate_wireguard_keypair();
@@ -156,9 +155,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                             display_connection_info(&dep, &client_priv, output.as_deref());
 
                             if should_connect {
-                                let conf_path = output.clone().unwrap_or_else(|| {
-                                    std::env::temp_dir().join("warpgate.conf")
-                                });
+                                let conf_path = output
+                                    .clone()
+                                    .unwrap_or_else(|| std::env::temp_dir().join("warpgate.conf"));
 
                                 let conf = generate_wireguard_config(
                                     &client_priv,
@@ -170,10 +169,14 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                                 );
                                 let _ = std::fs::write(&conf_path, &conf);
 
-                                println!("\n[--connect] Connecting laptop to WarpGate VPN via NetworkManager...");
+                                println!(
+                                    "\n[--connect] Connecting laptop to WarpGate VPN via NetworkManager..."
+                                );
                                 match connect_local_vpn(&conf_path, "warpgate") {
                                     Ok(_) => {
-                                        println!("SUCCESS: Laptop connected to WarpGate VPN! (Interface: warpgate)");
+                                        println!(
+                                            "SUCCESS: Laptop connected to WarpGate VPN! (Interface: warpgate)"
+                                        );
                                         if let Ok(ip_res) = client
                                             .get("https://api.ipify.org")
                                             .timeout(Duration::from_secs(4))
@@ -181,7 +184,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                                             .await
                                         {
                                             if let Ok(ip_text) = ip_res.text().await {
-                                                println!("Verified laptop public IP is now: {}", ip_text.trim());
+                                                println!(
+                                                    "Verified laptop public IP is now: {}",
+                                                    ip_text.trim()
+                                                );
                                             }
                                         }
                                     }
@@ -258,7 +264,6 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             }
         }
     }
-
 
     Ok(())
 }
@@ -372,7 +377,10 @@ pub fn connect_local_vpn(conf_path: &std::path::Path, conn_name: &str) -> Result
                 .map_err(|e| format!("Failed to run nmcli import: {}", e))?;
 
             if !import_status.success() {
-                return Err(format!("nmcli import failed with status: {}", import_status));
+                return Err(format!(
+                    "nmcli import failed with status: {}",
+                    import_status
+                ));
             }
 
             let up_status = std::process::Command::new("nmcli")
@@ -391,7 +399,6 @@ pub fn connect_local_vpn(conf_path: &std::path::Path, conn_name: &str) -> Result
                     up_status
                 ));
             }
-
         }
     }
 
@@ -503,12 +510,14 @@ mod tests {
 
     #[test]
     fn test_cli_parsing_up_defaults() {
-        let cli = Cli::try_parse_from(["warpgate", "up"]).unwrap();
+        let cli =
+            Cli::try_parse_from(["warpgate", "up", "--admin-cidr", "192.168.1.10/32"]).unwrap();
 
         match cli.command {
             Commands::Up {
                 region,
                 ttl,
+                admin_cidr,
                 output,
                 connect,
                 no_connect,
@@ -516,6 +525,7 @@ mod tests {
             } => {
                 assert_eq!(region, "us-east-1");
                 assert_eq!(ttl, "30m");
+                assert_eq!(admin_cidr, "192.168.1.10/32");
                 assert!(output.is_none());
                 assert!(connect);
                 assert!(!no_connect);
@@ -527,7 +537,15 @@ mod tests {
     #[test]
     fn test_cli_parsing_up_custom() {
         let cli = Cli::try_parse_from([
-            "warpgate", "up", "--region", "eu-central-1", "--ttl", "15m", "--no-connect",
+            "warpgate",
+            "up",
+            "--region",
+            "eu-central-1",
+            "--ttl",
+            "15m",
+            "--admin-cidr",
+            "10.0.0.5/32",
+            "--no-connect",
         ])
         .unwrap();
 
@@ -535,12 +553,14 @@ mod tests {
             Commands::Up {
                 region,
                 ttl,
+                admin_cidr,
                 connect,
                 no_connect,
                 ..
             } => {
                 assert_eq!(region, "eu-central-1");
                 assert_eq!(ttl, "15m");
+                assert_eq!(admin_cidr, "10.0.0.5/32");
                 assert!(connect);
                 assert!(no_connect);
             }
@@ -579,5 +599,3 @@ mod tests {
         }
     }
 }
-
-
