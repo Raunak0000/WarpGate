@@ -256,15 +256,18 @@ WarpGate/
 │       └── terraform_test.go
 │
 ├── scripts/
+│   ├── demo_walkthrough.sh
 │   └── run_benchmarks.sh
 │
 ├── docs/
 │   ├── ARCHITECTURE.md
 │   ├── BENCHMARK_REPORT.md
+│   ├── DEMO_WALKTHROUGH.md
 │   └── ROADMAP.md
 │
 ├── .gitignore
 ├── LICENSE
 └── README.md
+
 
 

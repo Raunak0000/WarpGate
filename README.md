@@ -4,9 +4,12 @@
 WarpGate provisions a temporary, self-destructing secure VPN gateway on AWS, configures a WireGuard tunnel automatically, validates connectivity, and tears down the infrastructure when the Time-to-Live (TTL) expires.
 
 ## Getting Started
-Please refer to the documentation for details on architecture and planning:
+Please refer to the documentation for details on architecture, benchmarking, and execution:
 - **[Roadmap](docs/ROADMAP.md)**: The 6-week project timeline and task breakdown.
 - **[Architecture](docs/ARCHITECTURE.md)**: Detailed system design and repository structure.
+- **[Benchmark Report](docs/BENCHMARK_REPORT.md)**: Network throughput (BBR vs. Cubic), latency, and DNS sinkhole benchmarks.
+- **[Demo Walkthrough](docs/DEMO_WALKTHROUGH.md)**: End-to-end lifecycle verification and terminal QR walkthrough.
+
 
 ## Quick Start
 
