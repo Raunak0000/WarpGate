@@ -255,11 +255,16 @@ WarpGate/
 │       ├── go.sum
 │       └── terraform_test.go
 │
+├── scripts/
+│   └── run_benchmarks.sh
+│
 ├── docs/
 │   ├── ARCHITECTURE.md
+│   ├── BENCHMARK_REPORT.md
 │   └── ROADMAP.md
 │
 ├── .gitignore
 ├── LICENSE
 └── README.md
+
 

@@ -32,8 +32,9 @@
     
 - **Week 6: Scaling & Performance Benchmarking**
   - [x] **Multi-Region:** Expand Terraform modules to support additional AWS regions (e.g., `us-east-1`, `eu-central-1`).
-  - [ ] **Benchmarking:** Compare default settings versus BBR-tuned settings using `iperf3`, `ping`, and `dig`.
+  - [x] **Benchmarking:** Compare default settings versus BBR-tuned settings using `iperf3`, `ping`, and `dig`.
   - [ ] **Final Demo:** Execute the full lifecycle from the `warpgate up` command, connecting via QR code, and ending with automated teardown.
+
 
 
 ---
