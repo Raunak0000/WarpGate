@@ -24,7 +24,16 @@ WarpGate is architected into four distinct layers providing an end-to-end epheme
    - The hardened network layer that securely routes and encrypts all outbound Internet traffic.
    - Enhanced with Linux kernel BBR TCP congestion control, AdGuard Home DNS sinkholing, and systemd watchdog auto-shutdown.
 
+5. **Multi-Region Scaling & Regional Resolution**
+   - WarpGate supports on-demand deployments across global AWS regions:
+     - **Americas**: `us-east-1` (Virginia), `us-east-2` (Ohio), `us-west-1` (California), `us-west-2` (Oregon)
+     - **Europe**: `eu-central-1` (Frankfurt), `eu-west-1` (Ireland), `eu-west-2` (London)
+     - **Asia-Pacific**: `ap-northeast-1` (Tokyo), `ap-southeast-1` (Singapore), `ap-south-1` (Mumbai)
+   - Dynamic region normalization accepts both canonical AWS IDs and human-friendly aliases (e.g., `--region tokyo` automatically maps to `ap-northeast-1`, and `--region frankfurt` maps to `eu-central-1`).
+   - AWS Dynamic Inventory automatically scans all active supported regions for instances tagged with `Role: vpn`.
+
 ## Diagram
+
 
 ```text
                          USER
@@ -240,6 +249,12 @@ WarpGate/
 │               └── tasks/
 │                   └── main.yml
 │
+├── tests/
+│   └── terratest/
+│       ├── go.mod
+│       ├── go.sum
+│       └── terraform_test.go
+│
 ├── docs/
 │   ├── ARCHITECTURE.md
 │   └── ROADMAP.md
@@ -247,3 +262,4 @@ WarpGate/
 ├── .gitignore
 ├── LICENSE
 └── README.md
+

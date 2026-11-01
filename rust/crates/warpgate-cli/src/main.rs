@@ -28,7 +28,7 @@ struct Cli {
 enum Commands {
     /// Provision a new ephemeral WireGuard VPN node
     Up {
-        /// Target AWS region
+        /// Target AWS region or alias (e.g. 'us-east-1', 'eu-central-1', 'tokyo', 'frankfurt')
         #[arg(short, long, default_value = "us-east-1")]
         region: String,
 
@@ -64,7 +64,7 @@ enum Commands {
         /// Deployment ID
         id: String,
 
-        /// AWS region where node was deployed
+        /// AWS region where node was deployed (or alias like 'tokyo')
         #[arg(short, long, default_value = "us-east-1")]
         region: String,
 
@@ -88,6 +88,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             connect,
             no_connect,
         } => {
+            let normalized_region = warpgate_common::normalize_region(&region)
+                .map_err(|e| format!("Invalid region '{}': {}", region, e))?
+                .to_string();
             let should_connect = connect && !no_connect;
             let ttl_minutes = parse_ttl_minutes(&ttl)?;
             let deployment_id = format!("warp-{}", &uuid_short());
@@ -97,12 +100,12 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
             println!(
                 "Requesting WarpGate deployment '{}' in region '{}' (TTL: {}m)...",
-                deployment_id, region, ttl_minutes
+                deployment_id, normalized_region, ttl_minutes
             );
 
             let req_body = DeploymentRequest {
                 deployment_id: deployment_id.clone(),
-                region: region.clone(),
+                region: normalized_region,
                 ttl_minutes,
                 client_public_key: client_pub,
                 admin_cidr: Some(admin_cidr),
@@ -237,14 +240,21 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             region,
             disconnect,
         } => {
+            let normalized_region = warpgate_common::normalize_region(&region)
+                .map_err(|e| format!("Invalid region '{}': {}", region, e))?
+                .to_string();
+
             if disconnect {
                 disconnect_local_vpn("warpgate");
             }
 
-            println!("Terminating deployment '{}' in region '{}'...", id, region);
+            println!(
+                "Terminating deployment '{}' in region '{}'...",
+                id, normalized_region
+            );
             let req_body = TeardownRequest {
                 deployment_id: id.clone(),
-                region,
+                region: normalized_region,
             };
 
             let res = client

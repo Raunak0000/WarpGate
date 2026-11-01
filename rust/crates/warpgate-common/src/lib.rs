@@ -48,6 +48,42 @@ pub struct TeardownResponse {
     pub message: String,
 }
 
+pub const SUPPORTED_REGIONS: &[&str] = &[
+    "us-east-1",
+    "us-east-2",
+    "us-west-1",
+    "us-west-2",
+    "eu-central-1",
+    "eu-west-1",
+    "eu-west-2",
+    "ap-northeast-1",
+    "ap-southeast-1",
+    "ap-south-1",
+];
+
+/// Normalizes AWS region names and human-friendly aliases (e.g., 'tokyo' -> 'ap-northeast-1',
+/// 'frankfurt' -> 'eu-central-1') to their canonical AWS region identifiers.
+pub fn normalize_region(input: &str) -> Result<&'static str, String> {
+    let cleaned = input.trim().to_ascii_lowercase();
+    match cleaned.as_str() {
+        "us-east-1" | "virginia" | "us-east" => Ok("us-east-1"),
+        "us-east-2" | "ohio" => Ok("us-east-2"),
+        "us-west-1" | "california" => Ok("us-west-1"),
+        "us-west-2" | "oregon" | "us-west" => Ok("us-west-2"),
+        "eu-central-1" | "frankfurt" | "germany" | "eu-central" => Ok("eu-central-1"),
+        "eu-west-1" | "ireland" | "eu-west" => Ok("eu-west-1"),
+        "eu-west-2" | "london" | "uk" => Ok("eu-west-2"),
+        "ap-northeast-1" | "tokyo" | "japan" | "ap-northeast" => Ok("ap-northeast-1"),
+        "ap-southeast-1" | "singapore" | "ap-southeast" => Ok("ap-southeast-1"),
+        "ap-south-1" | "mumbai" | "india" | "ap-south" => Ok("ap-south-1"),
+        _ => Err(format!(
+            "Unsupported region '{}'. Supported regions: {}",
+            input,
+            SUPPORTED_REGIONS.join(", ")
+        )),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -173,4 +209,31 @@ mod tests {
 
         assert_eq!(resp_parsed.status, DeploymentStatus::Terminating);
     }
+
+    #[test]
+    fn test_normalize_region_canonical() {
+        assert_eq!(normalize_region("us-east-1").unwrap(), "us-east-1");
+        assert_eq!(normalize_region("eu-central-1").unwrap(), "eu-central-1");
+        assert_eq!(normalize_region("ap-northeast-1").unwrap(), "ap-northeast-1");
+        assert_eq!(normalize_region("US-EAST-1").unwrap(), "us-east-1");
+    }
+
+    #[test]
+    fn test_normalize_region_aliases() {
+        assert_eq!(normalize_region("tokyo").unwrap(), "ap-northeast-1");
+        assert_eq!(normalize_region("frankfurt").unwrap(), "eu-central-1");
+        assert_eq!(normalize_region("ireland").unwrap(), "eu-west-1");
+        assert_eq!(normalize_region("virginia").unwrap(), "us-east-1");
+        assert_eq!(normalize_region("oregon").unwrap(), "us-west-2");
+        assert_eq!(normalize_region("mumbai").unwrap(), "ap-south-1");
+        assert_eq!(normalize_region("singapore").unwrap(), "ap-southeast-1");
+        assert_eq!(normalize_region("london").unwrap(), "eu-west-2");
+    }
+
+    #[test]
+    fn test_normalize_region_invalid() {
+        assert!(normalize_region("invalid-region").is_err());
+        assert!(normalize_region("mars-central-1").is_err());
+    }
 }
+

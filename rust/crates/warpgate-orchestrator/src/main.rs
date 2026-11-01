@@ -50,11 +50,32 @@ pub fn create_app(state: AppState) -> Router {
 
 async fn create_deployment(
     State(state): State<AppState>,
-    Json(payload): Json<DeploymentRequest>,
+    Json(mut payload): Json<DeploymentRequest>,
 ) -> (StatusCode, Json<DeploymentResponse>) {
     let deployment_id = payload.deployment_id.clone();
 
     info!("Received deployment request for ID: {}", deployment_id);
+
+    let normalized_region = match warpgate_common::normalize_region(&payload.region) {
+        Ok(r) => r.to_string(),
+        Err(err) => {
+            let response = DeploymentResponse {
+                deployment_id,
+                status: DeploymentStatus::Failed,
+                server_ip: None,
+                wireguard_port: None,
+                server_public_key: None,
+                client_ip: None,
+                dns_server: None,
+                error_message: Some(err),
+                region: payload.region,
+                admin_cidr: payload.admin_cidr.unwrap_or_default(),
+            };
+
+            return (StatusCode::BAD_REQUEST, Json(response));
+        }
+    };
+    payload.region = normalized_region.clone();
 
     let Some(admin_cidr) = payload.admin_cidr.clone() else {
         let response = DeploymentResponse {
@@ -85,7 +106,7 @@ async fn create_deployment(
         client_ip: Some("10.200.0.2/32".to_string()),
         dns_server: Some(dns),
         error_message: None,
-        region: payload.region.clone(),
+        region: normalized_region,
         admin_cidr,
     };
 
@@ -102,6 +123,7 @@ async fn create_deployment(
 
     (StatusCode::ACCEPTED, Json(initial_response))
 }
+
 
 async fn run_deployment_pipeline(state: AppState, req: DeploymentRequest) {
     let id = req.deployment_id.clone();
@@ -434,6 +456,73 @@ mod tests {
 
         assert_eq!(response.status(), StatusCode::NOT_FOUND);
     }
+
+    #[tokio::test]
+    async fn test_create_deployment_multi_region_alias() {
+        let state: AppState = Arc::new(RwLock::new(HashMap::new()));
+        let app = create_app(state);
+
+        let req_payload = serde_json::to_vec(&DeploymentRequest {
+            deployment_id: "warp-region-1".to_string(),
+            region: "tokyo".to_string(),
+            ttl_minutes: 10,
+            client_public_key: "dummy_client_key".to_string(),
+            admin_cidr: Some("0.0.0.0/0".to_string()),
+        })
+        .unwrap();
+
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/deployments")
+                    .header("content-type", "application/json")
+                    .body(Body::from(req_payload))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::ACCEPTED);
+        let body_bytes = response.into_body().collect().await.unwrap().to_bytes();
+        let dep: DeploymentResponse = serde_json::from_slice(&body_bytes).unwrap();
+        assert_eq!(dep.deployment_id, "warp-region-1");
+        assert_eq!(dep.region, "ap-northeast-1");
+    }
+
+    #[tokio::test]
+    async fn test_create_deployment_invalid_region() {
+        let state: AppState = Arc::new(RwLock::new(HashMap::new()));
+        let app = create_app(state);
+
+        let req_payload = serde_json::to_vec(&DeploymentRequest {
+            deployment_id: "warp-region-invalid".to_string(),
+            region: "atlantis-north-1".to_string(),
+            ttl_minutes: 10,
+            client_public_key: "dummy_client_key".to_string(),
+            admin_cidr: Some("0.0.0.0/0".to_string()),
+        })
+        .unwrap();
+
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/deployments")
+                    .header("content-type", "application/json")
+                    .body(Body::from(req_payload))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+        let body_bytes = response.into_body().collect().await.unwrap().to_bytes();
+        let dep: DeploymentResponse = serde_json::from_slice(&body_bytes).unwrap();
+        assert_eq!(dep.status, DeploymentStatus::Failed);
+        assert!(dep.error_message.unwrap().contains("Unsupported region"));
+    }
+
 
     #[tokio::test]
     async fn test_teardown_endpoint() {

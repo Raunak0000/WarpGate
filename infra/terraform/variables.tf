@@ -2,7 +2,24 @@ variable "aws_region" {
   description = "The AWS region to deploy the WarpGate VPN node"
   type        = string
   default     = "us-east-1"
+
+  validation {
+    condition = contains([
+      "us-east-1",
+      "us-east-2",
+      "us-west-1",
+      "us-west-2",
+      "eu-central-1",
+      "eu-west-1",
+      "eu-west-2",
+      "ap-northeast-1",
+      "ap-southeast-1",
+      "ap-south-1"
+    ], var.aws_region)
+    error_message = "The aws_region must be one of the supported WarpGate regions: us-east-1, us-east-2, us-west-1, us-west-2, eu-central-1, eu-west-1, eu-west-2, ap-northeast-1, ap-southeast-1, ap-south-1."
+  }
 }
+
 
 variable "vpc_cidr" {
   description = "CIDR block for the VPC"
