@@ -19,3 +19,13 @@ variable "ssh_public_key" {
   description = "SSH public key used to access the VPN instance"
   type        = string
 }
+
+variable "deployment_id" {
+  description = "Unique identifier for each WarpGate deployment"
+  type        = string
+
+  validation {
+    condition     = can(regex("^warp-[0-9a-f]{12}$", var.deployment_id))
+    error_message = "Deployment ID must start with 'warp-' followed by exactly 12 lowercase hexadecimal characters."
+  }
+}

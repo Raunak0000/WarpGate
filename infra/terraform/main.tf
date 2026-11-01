@@ -5,5 +5,5 @@ module "vpn_node" {
   subnet_cidr    = var.subnet_cidr
   admin_cidr     = var.admin_cidr
   ssh_public_key = var.ssh_public_key
+  deployment_id  = var.deployment_id
 }
- 

@@ -139,13 +139,13 @@ async fn run_deployment_pipeline(state: AppState, req: DeploymentRequest) {
     }
 
     // Run Terraform Apply
-    if let Err(e) = terraform::run_apply(&req.region, admin_cidr).await {
+    if let Err(e) = terraform::run_apply(&id, &req.region, admin_cidr).await {
         update_failed(&state, &id, format!("Terraform Apply Failed: {}", e)).await;
         return;
     }
 
     // Fetch Terraform Outputs
-    let outputs = match terraform::get_outputs().await {
+    let outputs = match terraform::get_outputs(&id).await {
         Ok(out) => out,
         Err(e) => {
             update_failed(
@@ -251,7 +251,7 @@ fn schedule_ttl_teardown(
             info!("DRY RUN: simulated TTL teardown for {}", id);
             Ok(())
         } else {
-            terraform::run_destroy(&region, &admin_cidr).await
+            terraform::run_destroy(&id, &region, &admin_cidr).await
         };
 
         finish_teardown(&state, &id, result).await;
@@ -328,7 +328,7 @@ async fn teardown_deployment(
             info!("Dry-run teardown for deployment {}", task_id);
             Ok(())
         } else {
-            terraform::run_destroy(&region, &admin_cidr).await
+            terraform::run_destroy(&task_id, &region, &admin_cidr).await
         };
 
         let mut store = task_state.write().await;

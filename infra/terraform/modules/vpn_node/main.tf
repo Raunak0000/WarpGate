@@ -1,3 +1,7 @@
+locals {
+  name_prefix = "wg-${substr(replace(var.deployment_id, "-", ""), 0, 8)}"
+}
+
 # VPC
 resource "aws_vpc" "warpgate_vpc" {
   cidr_block           = var.vpc_cidr
@@ -5,7 +9,7 @@ resource "aws_vpc" "warpgate_vpc" {
   enable_dns_hostnames = true
 
   tags = {
-    Name = "warpgate-vpc"
+    Name = "${local.name_prefix}-vpc"
   }
 }
 
@@ -18,7 +22,7 @@ resource "aws_default_security_group" "warpgate_default_sg" {
   egress  = []
 
   tags = {
-    Name = "warpgate-default-sg"
+    Name = "${local.name_prefix}-default-sg"
   }
 }
 
@@ -27,7 +31,7 @@ resource "aws_internet_gateway" "warpgate_igw" {
   vpc_id = aws_vpc.warpgate_vpc.id
 
   tags = {
-    Name = "warpgate-igw"
+    Name = "${local.name_prefix}-igw"
   }
 }
 
@@ -41,7 +45,7 @@ resource "aws_subnet" "warpgate_subnet" {
   map_public_ip_on_launch = false
 
   tags = {
-    Name = "warpgate-public-subnet"
+    Name = "${local.name_prefix}-subnet"
   }
 }
 
@@ -55,7 +59,7 @@ resource "aws_route_table" "warpgate_rt" {
   }
 
   tags = {
-    Name = "warpgate-rt"
+    Name = "${local.name_prefix}-rt"
   }
 }
 
@@ -66,7 +70,7 @@ resource "aws_route_table_association" "warpgate_rta" {
 
 # Security Group
 resource "aws_security_group" "warpgate_sg" {
-  name        = "warpgate-sg"
+  name        = "${local.name_prefix}-sg"
   description = "Security group for the WarpGate WireGuard VPN gateway"
   vpc_id      = aws_vpc.warpgate_vpc.id
 
@@ -99,13 +103,13 @@ resource "aws_security_group" "warpgate_sg" {
   }
 
   tags = {
-    Name = "warpgate-sg"
+    Name = "${local.name_prefix}-sg"
   }
 }
 
 # SSH Key Pair
 resource "aws_key_pair" "warpgate_key" {
-  key_name   = "warpgate-key"
+  key_name   = "${local.name_prefix}-key"
   public_key = var.ssh_public_key
 }
 
@@ -122,7 +126,7 @@ data "aws_ami" "ubuntu" {
 
 # IAM Role for EC2
 resource "aws_iam_role" "warpgate_ec2_role" {
-  name = "warpgate-ec2-role"
+  name = "${local.name_prefix}-ec2-role"
 
   assume_role_policy = jsonencode({
     Version = "2012-10-17"
@@ -141,7 +145,7 @@ resource "aws_iam_role" "warpgate_ec2_role" {
   })
 
   tags = {
-    Name = "warpgate-ec2-role"
+    Name = "${local.name_prefix}-ec2-role"
   }
 }
 
@@ -153,17 +157,17 @@ resource "aws_iam_role_policy_attachment" "warpgate_ssm" {
 
 # EC2 Instance Profile
 resource "aws_iam_instance_profile" "warpgate_profile" {
-  name = "warpgate-ec2-profile"
+  name = "${local.name_prefix}-ec2-profile"
   role = aws_iam_role.warpgate_ec2_role.name
 
   tags = {
-    Name = "warpgate-ec2-profile"
+    Name = "${local.name_prefix}-ec2-profile"
   }
 }
 
 # EC2 Instance
 resource "aws_instance" "warpgate_node" {
-  ami           = "ami-062944a84867f2386"
+  ami           = data.aws_ami.ubuntu.id
   instance_type = "t3.micro"
   subnet_id     = aws_subnet.warpgate_subnet.id
 
@@ -201,7 +205,7 @@ resource "aws_instance" "warpgate_node" {
   }
 
   tags = {
-    Name = "warpgate-node"
+    Name = "${local.name_prefix}-node"
     Role = "vpn"
   }
 }
@@ -212,7 +216,7 @@ resource "aws_eip" "warpgate_eip" {
   domain   = "vpc"
 
   tags = {
-    Name = "warpgate-eip"
+    Name = "${local.name_prefix}-eip"
   }
 }
 
@@ -225,7 +229,7 @@ resource "aws_kms_key" "warpgate_logs" {
   enable_key_rotation = true
 
   tags = {
-    Name = "warpgate-logs-kms"
+    Name = "${local.name_prefix}-logs-kms"
   }
 }
 
@@ -277,24 +281,24 @@ resource "aws_kms_key_policy" "warpgate_logs" {
 
 # KMS Alias
 resource "aws_kms_alias" "warpgate_logs" {
-  name          = "alias/warpgate-logs"
+  name          = "alias/${local.name_prefix}-logs"
   target_key_id = aws_kms_key.warpgate_logs.key_id
 }
 
 # CloudWatch Log Group for VPC Flow Logs
 resource "aws_cloudwatch_log_group" "warpgate_vpc_flow_logs" {
-  name              = "/aws/vpc/warpgate"
+  name              = "/aws/vpc/${local.name_prefix}"
   retention_in_days = 365
   kms_key_id        = aws_kms_key.warpgate_logs.arn
 
   tags = {
-    Name = "warpgate-vpc-flow-logs"
+    Name = "${local.name_prefix}-flow-logs"
   }
 }
 
 # IAM role used by VPC Flow Logs to publish to CloudWatch.
 resource "aws_iam_role" "warpgate_flow_logs_role" {
-  name = "warpgate-vpc-flow-logs-role"
+  name = "${local.name_prefix}-flow-logs-role"
 
   assume_role_policy = jsonencode({
     Version = "2012-10-17"
@@ -313,12 +317,12 @@ resource "aws_iam_role" "warpgate_flow_logs_role" {
   })
 
   tags = {
-    Name = "warpgate-vpc-flow-logs-role"
+    Name = "${local.name_prefix}-flow-logs-role"
   }
 }
 
 resource "aws_iam_role_policy" "warpgate_flow_logs_policy" {
-  name = "warpgate-vpc-flow-logs-policy"
+  name = "${local.name_prefix}-flow-logs-policy"
   role = aws_iam_role.warpgate_flow_logs_role.id
 
   policy = jsonencode({
@@ -349,6 +353,6 @@ resource "aws_flow_log" "warpgate_vpc_flow_log" {
   log_destination = aws_cloudwatch_log_group.warpgate_vpc_flow_logs.arn
 
   tags = {
-    Name = "warpgate-vpc-flow-log"
+    Name = "${local.name_prefix}-flow-log"
   }
 }

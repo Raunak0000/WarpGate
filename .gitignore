@@ -23,3 +23,6 @@ hosts.ini
 
 target/
 **/target/
+
+# WarpGate deployment-specific Terraform state
+.warpgate/

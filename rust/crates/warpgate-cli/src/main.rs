@@ -295,8 +295,8 @@ fn parse_ttl_minutes(s: &str) -> Result<u32, String> {
 }
 
 fn uuid_short() -> String {
-    let r: u32 = rand::random();
-    format!("{:06x}", r & 0xffffff)
+    let r: u64 = rand::random();
+    format!("{:012x}", r & 0x0000_ffff_ffff_ffff)
 }
 
 pub fn generate_wireguard_config(
@@ -503,9 +503,11 @@ mod tests {
     fn test_uuid_short() {
         let id1 = uuid_short();
         let id2 = uuid_short();
-        assert_eq!(id1.len(), 6);
-        assert_eq!(id2.len(), 6);
-        assert!(u32::from_str_radix(&id1, 16).is_ok());
+
+        assert_eq!(id1.len(), 12);
+        assert_eq!(id2.len(), 12);
+        assert!(u64::from_str_radix(&id1, 16).is_ok());
+        assert!(u64::from_str_radix(&id2, 16).is_ok());
     }
 
     #[test]
