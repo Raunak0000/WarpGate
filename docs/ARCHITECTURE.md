@@ -242,8 +242,7 @@ WarpGate/
 │
 ├── docs/
 │   ├── ARCHITECTURE.md
-│   ├── ROADMAP.md
-│   └── CAREER.md
+│   └── ROADMAP.md
 │
 ├── .gitignore
 ├── LICENSE
