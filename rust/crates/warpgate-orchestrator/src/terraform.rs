@@ -102,8 +102,69 @@ fn get_deployment_terraform_dir(deployment_id: &str) -> Result<PathBuf, String> 
     Ok(destination)
 }
 
+pub fn resolve_ssh_public_key() -> Result<String, String> {
+    // 1. Check explicit WARPGATE_SSH_PUBLIC_KEY env var
+    if let Ok(key) = std::env::var("WARPGATE_SSH_PUBLIC_KEY") {
+        let trimmed = key.trim();
+        if !trimmed.is_empty() {
+            return Ok(trimmed.to_string());
+        }
+    }
+
+    // 2. Check TF_VAR_ssh_public_key env var
+    if let Ok(key) = std::env::var("TF_VAR_ssh_public_key") {
+        let trimmed = key.trim();
+        if !trimmed.is_empty() {
+            return Ok(trimmed.to_string());
+        }
+    }
+
+    // 3. Check public key file matching WARPGATE_SSH_KEY (.pub)
+    let private_key = std::env::var("WARPGATE_SSH_KEY").unwrap_or_else(|_| {
+        let home = std::env::var("HOME").unwrap_or_default();
+        format!("{}/.ssh/warpgate_key", home)
+    });
+    let pub_path = format!("{}.pub", private_key);
+    if let Ok(content) = fs::read_to_string(&pub_path) {
+        let trimmed = content.trim();
+        if !trimmed.is_empty() {
+            return Ok(trimmed.to_string());
+        }
+    }
+
+    // 4. Fallback to terraform.tfvars in the terraform source directory
+    let tfvars_path = get_terraform_source_dir().join("terraform.tfvars");
+    if let Ok(content) = fs::read_to_string(&tfvars_path) {
+        if let Some(key) = parse_ssh_public_key_from_tfvars(&content) {
+            return Ok(key);
+        }
+    }
+
+    Err(
+        "SSH public key not found. Please set WARPGATE_SSH_PUBLIC_KEY, create ~/.ssh/warpgate_key.pub, or define ssh_public_key in terraform.tfvars."
+            .to_string(),
+    )
+}
+
+fn parse_ssh_public_key_from_tfvars(content: &str) -> Option<String> {
+    for line in content.lines() {
+        let trimmed = line.trim();
+        if let Some(rest) = trimmed.strip_prefix("ssh_public_key") {
+            let rest = rest.trim_start();
+            if let Some(val) = rest.strip_prefix('=') {
+                let val = val.trim().trim_matches('"').trim_matches('\'');
+                if !val.is_empty() {
+                    return Some(val.to_string());
+                }
+            }
+        }
+    }
+    None
+}
+
 pub async fn run_apply(deployment_id: &str, region: &str, admin_cidr: &str) -> Result<(), String> {
     let tf_dir = get_deployment_terraform_dir(deployment_id)?;
+    let ssh_public_key = resolve_ssh_public_key()?;
 
     info!(
         "Running Terraform apply for deployment {} in {:?}",
@@ -131,6 +192,7 @@ pub async fn run_apply(deployment_id: &str, region: &str, admin_cidr: &str) -> R
         .arg(format!("-var=deployment_id={}", deployment_id))
         .arg(format!("-var=aws_region={}", region))
         .arg(format!("-var=admin_cidr={}", admin_cidr))
+        .arg(format!("-var=ssh_public_key={}", ssh_public_key))
         .current_dir(&tf_dir)
         .stdout(Stdio::inherit())
         .stderr(Stdio::inherit())
@@ -176,6 +238,7 @@ pub async fn run_destroy(
     admin_cidr: &str,
 ) -> Result<(), String> {
     let tf_dir = get_deployment_terraform_dir(deployment_id)?;
+    let ssh_public_key = resolve_ssh_public_key().unwrap_or_default();
 
     info!(
         "Running Terraform destroy for deployment {} in {:?}",
@@ -189,6 +252,7 @@ pub async fn run_destroy(
         .arg(format!("-var=deployment_id={}", deployment_id))
         .arg(format!("-var=aws_region={}", region))
         .arg(format!("-var=admin_cidr={}", admin_cidr))
+        .arg(format!("-var=ssh_public_key={}", ssh_public_key))
         .current_dir(&tf_dir)
         .stdout(Stdio::inherit())
         .stderr(Stdio::inherit())
@@ -296,5 +360,33 @@ mod tests {
         assert!(!destination.join(".terraform").exists());
 
         fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn test_parse_ssh_public_key_from_tfvars() {
+        let sample = r#"
+admin_cidr     = "202.131.155.170/32"
+ssh_public_key = "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIOfFNypsgLNoYhhTmLgWNne8hBnQKPUJ5wanjnXu7FD8 warpgate-admin"
+"#;
+        let parsed = parse_ssh_public_key_from_tfvars(sample);
+        assert_eq!(
+            parsed,
+            Some("ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIOfFNypsgLNoYhhTmLgWNne8hBnQKPUJ5wanjnXu7FD8 warpgate-admin".to_string())
+        );
+
+        let none_sample = r#"admin_cidr = "10.0.0.0/16""#;
+        assert_eq!(parse_ssh_public_key_from_tfvars(none_sample), None);
+    }
+
+    #[test]
+    fn test_resolve_ssh_public_key_from_env() {
+        unsafe {
+            std::env::set_var("WARPGATE_SSH_PUBLIC_KEY", "ssh-rsa DUMMYKEY user@test");
+        }
+        let key = resolve_ssh_public_key().unwrap();
+        assert_eq!(key, "ssh-rsa DUMMYKEY user@test");
+        unsafe {
+            std::env::remove_var("WARPGATE_SSH_PUBLIC_KEY");
+        }
     }
 }
