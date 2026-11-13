@@ -1,4 +1,5 @@
 mod ansible;
+pub mod db;
 mod terraform;
 
 use axum::{
@@ -7,18 +8,17 @@ use axum::{
     http::StatusCode,
     routing::{get, post},
 };
-use std::collections::HashMap;
+use db::DbStore;
 use std::net::SocketAddr;
 use std::sync::Arc;
 use std::time::Duration;
-use tokio::sync::RwLock;
 use tracing::{error, info, warn};
 use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt};
 use warpgate_common::{
     DeploymentRequest, DeploymentResponse, DeploymentStatus, TeardownRequest, TeardownResponse,
 };
 
-type AppState = Arc<RwLock<HashMap<String, DeploymentResponse>>>;
+pub type AppState = Arc<DbStore>;
 
 #[tokio::main]
 async fn main() {
@@ -30,7 +30,12 @@ async fn main() {
         .with(tracing_subscriber::fmt::layer())
         .init();
 
-    let state: AppState = Arc::new(RwLock::new(HashMap::new()));
+    let db = DbStore::open_default().expect("Failed to initialize persistent SQLite database");
+    let state: AppState = Arc::new(db);
+
+    // Run crash recovery on startup to resume timers or roll back interrupted nodes
+    recover_in_flight_deployments(&state).await;
+
     let app = create_app(state);
 
     let addr = SocketAddr::from(([0, 0, 0, 0], 3000));
@@ -48,6 +53,28 @@ pub fn create_app(state: AppState) -> Router {
         .with_state(state)
 }
 
+async fn notify_webhook(deployment_id: &str, status: &DeploymentStatus, error_message: Option<&str>) {
+    let base_url = std::env::var("WARPGATE_CONTROL_PLANE_URL")
+        .unwrap_or_else(|_| "http://localhost:8080".to_string());
+    let url = format!("{}/api/deployments/{}/webhook", base_url.trim_end_matches('/'), deployment_id);
+    let payload = serde_json::json!({
+        "status": status,
+        "error_message": error_message,
+    });
+
+    let client = reqwest::Client::new();
+    let res = client
+        .post(&url)
+        .timeout(Duration::from_millis(1500))
+        .json(&payload)
+        .send()
+        .await;
+
+    if let Err(e) = res {
+        tracing::debug!("Webhook delivery to {} skipped/failed: {}", url, e);
+    }
+}
+
 async fn create_deployment(
     State(state): State<AppState>,
     Json(mut payload): Json<DeploymentRequest>,
@@ -56,6 +83,27 @@ async fn create_deployment(
 
     info!("Received deployment request for ID: {}", deployment_id);
 
+    // 1. Account Quota Circuit Breaker: Max 120 minutes (2h) TTL
+    if payload.ttl_minutes == 0 || payload.ttl_minutes > 120 {
+        let response = DeploymentResponse {
+            deployment_id,
+            status: DeploymentStatus::Failed,
+            server_ip: None,
+            wireguard_port: None,
+            server_public_key: None,
+            client_ip: None,
+            dns_server: None,
+            error_message: Some(
+                "Account quota exceeded: TTL must be between 1 and 120 minutes (2 hours maximum for AWS Free Tier)".to_string(),
+            ),
+            region: payload.region,
+            admin_cidr: payload.admin_cidr.unwrap_or_default(),
+        };
+
+        return (StatusCode::BAD_REQUEST, Json(response));
+    }
+
+    // 2. Region normalization & validation
     let normalized_region = match warpgate_common::normalize_region(&payload.region) {
         Ok(r) => r.to_string(),
         Err(err) => {
@@ -77,6 +125,7 @@ async fn create_deployment(
     };
     payload.region = normalized_region.clone();
 
+    // 3. Admin CIDR validation
     let Some(admin_cidr) = payload.admin_cidr.clone() else {
         let response = DeploymentResponse {
             deployment_id,
@@ -94,6 +143,32 @@ async fn create_deployment(
         return (StatusCode::BAD_REQUEST, Json(response));
     };
 
+    // 4. Account Quota Circuit Breaker: Max 1 concurrent active instance
+    match state.count_active_deployments(Some(&deployment_id)) {
+        Ok(count) if count >= 1 => {
+            let response = DeploymentResponse {
+                deployment_id,
+                status: DeploymentStatus::Failed,
+                server_ip: None,
+                wireguard_port: None,
+                server_public_key: None,
+                client_ip: None,
+                dns_server: None,
+                error_message: Some(
+                    "Account quota exceeded: Maximum 1 concurrent active deployment allowed to ensure zero unexpected AWS Free Tier billing".to_string(),
+                ),
+                region: payload.region,
+                admin_cidr,
+            };
+
+            return (StatusCode::CONFLICT, Json(response));
+        }
+        Err(e) => {
+            error!("Database error checking active deployments: {}", e);
+        }
+        _ => {}
+    }
+
     let dns =
         std::env::var("WARPGATE_DNS_SERVER").unwrap_or_else(|_| "1.1.1.1, 10.200.0.1".to_string());
 
@@ -110,10 +185,12 @@ async fn create_deployment(
         admin_cidr,
     };
 
-    {
-        let mut store = state.write().await;
-        store.insert(deployment_id.clone(), initial_response.clone());
+    let is_dry_run = std::env::var("WARPGATE_DRY_RUN").as_deref() == Ok("1");
+    if let Err(e) = state.insert_deployment(&initial_response, payload.ttl_minutes, is_dry_run) {
+        error!("Failed to persist deployment {}: {}", deployment_id, e);
     }
+
+    notify_webhook(&deployment_id, &DeploymentStatus::ProvisioningInfra, None).await;
 
     let task_state = Arc::clone(&state);
 
@@ -124,29 +201,39 @@ async fn create_deployment(
     (StatusCode::ACCEPTED, Json(initial_response))
 }
 
-
 async fn run_deployment_pipeline(state: AppState, req: DeploymentRequest) {
     let id = req.deployment_id.clone();
     let admin_cidr = req
         .admin_cidr
         .as_deref()
         .expect("admin_cidr must be validated before provisioning");
+
     // Safe integration test: never invokes Terraform or Ansible.
     if std::env::var("WARPGATE_DRY_RUN").as_deref() == Ok("1") {
         info!("Dry run enabled for deployment {}", id);
 
-        {
-            let mut store = state.write().await;
-
-            if let Some(entry) = store.get_mut(&id) {
-                entry.status = DeploymentStatus::Ready;
-                entry.server_ip = Some("203.0.113.10".to_string());
-                entry.server_public_key =
-                    Some("M0pTVJqVNONA94wmPZCeNGDnEKSDXvu+yXEqtvqpp1I=".to_string());
-                entry.error_message =
-                    Some("DRY RUN: simulated deployment; no AWS resources created".to_string());
+        // Simulated partial failure hook for automated rollback testing
+        if let Ok(sim_fail) = std::env::var("WARPGATE_SIMULATE_FAILURE") {
+            if sim_fail == "partial" {
+                info!("Simulating partial failure for testing rollback");
+                update_failed(
+                    &state,
+                    &id,
+                    "Simulated partial failure during configuration. Automatic rollback executed and infrastructure destroyed.".to_string(),
+                ).await;
+                return;
             }
         }
+
+        if let Err(e) = state.update_ready(
+            &id,
+            Some("203.0.113.10"),
+            "M0pTVJqVNONA94wmPZCeNGDnEKSDXvu+yXEqtvqpp1I=",
+            Some("DRY RUN: simulated deployment; no AWS resources created"),
+        ) {
+            error!("Failed to update database ready status for {}: {}", id, e);
+        }
+        notify_webhook(&id, &DeploymentStatus::Ready, None).await;
 
         schedule_ttl_teardown(
             Arc::clone(&state),
@@ -160,20 +247,32 @@ async fn run_deployment_pipeline(state: AppState, req: DeploymentRequest) {
         return;
     }
 
-    // Run Terraform Apply
+    // 1. Run Terraform Apply
     if let Err(e) = terraform::run_apply(&id, &req.region, admin_cidr).await {
-        update_failed(&state, &id, format!("Terraform Apply Failed: {}", e)).await;
+        // Partial failure rollback: ensure partial infrastructure is torn down immediately
+        let _ = terraform::run_destroy(&id, &req.region, admin_cidr).await;
+        update_failed(
+            &state,
+            &id,
+            format!("Terraform Apply Failed: {}. Automatic rollback executed.", e),
+        )
+        .await;
         return;
     }
 
-    // Fetch Terraform Outputs
+    // 2. Fetch Terraform Outputs
     let outputs = match terraform::get_outputs(&id).await {
         Ok(out) => out,
         Err(e) => {
+            // Partial failure rollback: destroy provisioned infrastructure on output failure
+            let _ = terraform::run_destroy(&id, &req.region, admin_cidr).await;
             update_failed(
                 &state,
                 &id,
-                format!("Terraform Output Parsing Failed: {}", e),
+                format!(
+                    "Terraform Output Parsing Failed: {}. Automatic rollback executed and infrastructure destroyed.",
+                    e
+                ),
             )
             .await;
             return;
@@ -182,28 +281,45 @@ async fn run_deployment_pipeline(state: AppState, req: DeploymentRequest) {
 
     let server_ip = outputs.public_ip.value;
 
-    // Update Status to ConfiguringVpn
-    {
-        let mut store = state.write().await;
-        if let Some(entry) = store.get_mut(&id) {
-            entry.status = DeploymentStatus::ConfiguringVpn;
-            entry.server_ip = Some(server_ip.clone());
-        }
+    // 3. Update Status to ConfiguringVpn
+    if let Err(e) = state.update_configuring_vpn(&id, &server_ip) {
+        error!("Failed to update database status for {}: {}", id, e);
     }
+    notify_webhook(&id, &DeploymentStatus::ConfiguringVpn, None).await;
 
-    // Wait for SSH to be reachable
+    // 4. Wait for SSH to be reachable
     if let Err(e) = ansible::wait_for_ssh(&server_ip, 20, 3).await {
-        update_failed(&state, &id, format!("SSH Connectivity Failed: {}", e)).await;
+        // Partial failure rollback: destroy provisioned node if SSH fails
+        let _ = terraform::run_destroy(&id, &req.region, admin_cidr).await;
+        update_failed(
+            &state,
+            &id,
+            format!(
+                "SSH Connectivity Failed: {}. Automatic rollback executed and infrastructure destroyed.",
+                e
+            ),
+        )
+        .await;
         return;
     }
 
-    // Run Ansible Playbook
+    // 5. Run Ansible Playbook
     if let Err(e) = ansible::run_playbook(&server_ip, &req.client_public_key).await {
-        update_failed(&state, &id, format!("Ansible Playbook Failed: {}", e)).await;
+        // Partial failure rollback: destroy node if playbook execution fails
+        let _ = terraform::run_destroy(&id, &req.region, admin_cidr).await;
+        update_failed(
+            &state,
+            &id,
+            format!(
+                "Ansible Playbook Failed: {}. Automatic rollback executed and infrastructure destroyed.",
+                e
+            ),
+        )
+        .await;
         return;
     }
 
-    // Retrieve WireGuard public key from server (or fallback)
+    // 6. Retrieve WireGuard public key from server (or fallback)
     let server_pub_key = match ansible::get_server_public_key(&server_ip).await {
         Ok(key) => key,
         Err(e) => {
@@ -215,14 +331,12 @@ async fn run_deployment_pipeline(state: AppState, req: DeploymentRequest) {
         }
     };
 
-    // Mark Ready
-    {
-        let mut store = state.write().await;
-        if let Some(entry) = store.get_mut(&id) {
-            entry.status = DeploymentStatus::Ready;
-            entry.server_public_key = Some(server_pub_key);
-        }
+    // 7. Mark Ready
+    if let Err(e) = state.update_ready(&id, None, &server_pub_key, None) {
+        error!("Failed to update ready state in database: {}", e);
     }
+    notify_webhook(&id, &DeploymentStatus::Ready, None).await;
+
     info!("Deployment {} successfully provisioned and configured!", id);
 
     schedule_ttl_teardown(
@@ -246,19 +360,18 @@ fn schedule_ttl_teardown(
     tokio::spawn(async move {
         info!("TTL timer started for {} ({:?})", id, ttl);
 
-        tokio::time::sleep(ttl).await;
+        if !ttl.is_zero() {
+            tokio::time::sleep(ttl).await;
+        }
 
         // Atomically claim the deployment for teardown.
-        let should_destroy = {
-            let mut store = state.write().await;
-
-            match store.get_mut(&id) {
-                Some(entry) if entry.status == DeploymentStatus::Ready => {
-                    entry.status = DeploymentStatus::Terminating;
-                    true
-                }
-                _ => false,
+        let should_destroy = match state.get_deployment(&id) {
+            Ok(Some(entry)) if entry.status == DeploymentStatus::Ready => {
+                let _ = state.update_status(&id, &DeploymentStatus::Terminating, None);
+                notify_webhook(&id, &DeploymentStatus::Terminating, None).await;
+                true
             }
+            _ => false,
         };
 
         if !should_destroy {
@@ -283,39 +396,38 @@ fn schedule_ttl_teardown(
 }
 
 async fn finish_teardown(state: &AppState, id: &str, result: Result<(), String>) {
-    let mut store = state.write().await;
-
-    if let Some(entry) = store.get_mut(id) {
-        match result {
-            Ok(()) => {
-                entry.status = DeploymentStatus::Destroyed;
-                entry.error_message = None;
-            }
-            Err(e) => {
-                entry.status = DeploymentStatus::Failed;
-                entry.error_message = Some(format!("Teardown failed: {}", e));
-            }
+    match result {
+        Ok(()) => {
+            let _ = state.update_status(id, &DeploymentStatus::Destroyed, None);
+            notify_webhook(id, &DeploymentStatus::Destroyed, None).await;
+            info!("Deployment {} successfully destroyed", id);
+        }
+        Err(e) => {
+            let err_msg = format!("Teardown failed: {}", e);
+            let _ = state.update_status(id, &DeploymentStatus::Failed, Some(&err_msg));
+            notify_webhook(id, &DeploymentStatus::Failed, Some(&err_msg)).await;
+            error!("Teardown failed for {}: {}", id, e);
         }
     }
 }
 
 async fn update_failed(state: &AppState, id: &str, err_msg: String) {
     error!("Deployment {} failed: {}", id, err_msg);
-    let mut store = state.write().await;
-    if let Some(entry) = store.get_mut(id) {
-        entry.status = DeploymentStatus::Failed;
-        entry.error_message = Some(err_msg);
-    }
+    let _ = state.update_status(id, &DeploymentStatus::Failed, Some(&err_msg));
+    notify_webhook(id, &DeploymentStatus::Failed, Some(&err_msg)).await;
 }
 
 async fn get_deployment(
     State(state): State<AppState>,
     Path(id): Path<String>,
 ) -> Result<Json<DeploymentResponse>, StatusCode> {
-    let store = state.read().await;
-    match store.get(&id) {
-        Some(response) => Ok(Json(response.clone())),
-        None => Err(StatusCode::NOT_FOUND),
+    match state.get_deployment(&id) {
+        Ok(Some(response)) => Ok(Json(response)),
+        Ok(None) => Err(StatusCode::NOT_FOUND),
+        Err(e) => {
+            error!("Failed to get deployment {}: {}", id, e);
+            Err(StatusCode::INTERNAL_SERVER_ERROR)
+        }
     }
 }
 
@@ -326,22 +438,21 @@ async fn teardown_deployment(
 ) -> Result<Json<TeardownResponse>, StatusCode> {
     info!("Received teardown request for deployment {}", id);
 
-    // Atomically claim the deployment for teardown and retrieve
-    // the original infrastructure configuration.
-    let (region, admin_cidr) = {
-        let mut store = state.write().await;
-
-        let entry = store.get_mut(&id).ok_or(StatusCode::NOT_FOUND)?;
-
-        if entry.status != DeploymentStatus::Ready {
-            return Err(StatusCode::CONFLICT);
-        }
-
-        entry.status = DeploymentStatus::Terminating;
-
-        (entry.region.clone(), entry.admin_cidr.clone())
+    let dep = match state.get_deployment(&id) {
+        Ok(Some(d)) => d,
+        Ok(None) => return Err(StatusCode::NOT_FOUND),
+        Err(_) => return Err(StatusCode::INTERNAL_SERVER_ERROR),
     };
 
+    if dep.status != DeploymentStatus::Ready {
+        return Err(StatusCode::CONFLICT);
+    }
+
+    let _ = state.update_status(&id, &DeploymentStatus::Terminating, None);
+    notify_webhook(&id, &DeploymentStatus::Terminating, None).await;
+
+    let region = dep.region.clone();
+    let admin_cidr = dep.admin_cidr.clone();
     let task_state = Arc::clone(&state);
     let task_id = id.clone();
 
@@ -353,21 +464,7 @@ async fn teardown_deployment(
             terraform::run_destroy(&task_id, &region, &admin_cidr).await
         };
 
-        let mut store = task_state.write().await;
-
-        if let Some(entry) = store.get_mut(&task_id) {
-            match result {
-                Ok(_) => {
-                    entry.status = DeploymentStatus::Destroyed;
-                    info!("Deployment {} successfully destroyed", task_id);
-                }
-                Err(e) => {
-                    entry.status = DeploymentStatus::Failed;
-                    entry.error_message = Some(format!("Teardown failed: {}", e));
-                    error!("Teardown failed for {}: {}", task_id, e);
-                }
-            }
-        }
+        finish_teardown(&task_state, &task_id, result).await;
     });
 
     Ok(Json(TeardownResponse {
@@ -375,6 +472,87 @@ async fn teardown_deployment(
         status: DeploymentStatus::Terminating,
         message: "Teardown initiated".to_string(),
     }))
+}
+
+/// Recovers in-flight or interrupted deployments on orchestrator startup.
+pub async fn recover_in_flight_deployments(state: &AppState) {
+    info!("Scanning for in-flight deployments to recover from persistent storage...");
+    let active_list = match state.list_active_deployments() {
+        Ok(list) => list,
+        Err(e) => {
+            error!("Failed to query recoverable deployments: {}", e);
+            return;
+        }
+    };
+
+    if active_list.is_empty() {
+        info!("No active in-flight deployments found to recover.");
+        return;
+    }
+
+    info!("Found {} active deployment(s) to recover", active_list.len());
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs() as i64;
+
+    for dep in active_list {
+        let id = dep.deployment_id.clone();
+        match dep.status {
+            DeploymentStatus::Ready => {
+                if now >= dep.expires_at {
+                    info!(
+                        "Deployment {} TTL expired while offline (expired {}s ago); triggering immediate teardown",
+                        id,
+                        now - dep.expires_at
+                    );
+                    schedule_ttl_teardown(
+                        Arc::clone(state),
+                        id,
+                        dep.region,
+                        dep.admin_cidr,
+                        Duration::from_secs(0),
+                        dep.is_dry_run,
+                    );
+                } else {
+                    let remaining_secs = (dep.expires_at - now) as u64;
+                    info!(
+                        "Resuming TTL timer for deployment {} ({}s remaining)",
+                        id, remaining_secs
+                    );
+                    schedule_ttl_teardown(
+                        Arc::clone(state),
+                        id,
+                        dep.region,
+                        dep.admin_cidr,
+                        Duration::from_secs(remaining_secs),
+                        dep.is_dry_run,
+                    );
+                }
+            }
+            DeploymentStatus::ProvisioningInfra
+            | DeploymentStatus::ConfiguringVpn
+            | DeploymentStatus::Terminating => {
+                warn!(
+                    "Deployment {} was in progress ({:?}) when orchestrator stopped; rolling back and terminating",
+                    id, dep.status
+                );
+                let task_state = Arc::clone(state);
+                tokio::spawn(async move {
+                    if !dep.is_dry_run {
+                        let _ = terraform::run_destroy(&id, &dep.region, &dep.admin_cidr).await;
+                    }
+                    update_failed(
+                        &task_state,
+                        &id,
+                        "Interrupted by orchestrator restart. Automated rollback terminated lingering infrastructure.".to_string(),
+                    )
+                    .await;
+                });
+            }
+            _ => {}
+        }
+    }
 }
 
 #[cfg(test)]
@@ -385,9 +563,28 @@ mod tests {
     use http_body_util::BodyExt;
     use tower::ServiceExt;
 
+    fn create_test_state() -> AppState {
+        Arc::new(DbStore::open_in_memory().unwrap())
+    }
+
+    fn create_test_deployment(id: &str, status: DeploymentStatus) -> DeploymentResponse {
+        DeploymentResponse {
+            deployment_id: id.to_string(),
+            status,
+            server_ip: Some("203.0.113.10".to_string()),
+            wireguard_port: Some(51820),
+            server_public_key: None,
+            client_ip: Some("10.200.0.2/32".to_string()),
+            dns_server: Some("1.1.1.1".to_string()),
+            error_message: None,
+            region: "us-east-1".to_string(),
+            admin_cidr: "192.168.1.10/32".to_string(),
+        }
+    }
+
     #[tokio::test]
     async fn test_create_and_get_deployment() {
-        let state: AppState = Arc::new(RwLock::new(HashMap::new()));
+        let state = create_test_state();
         let app = create_app(state);
 
         let req_payload = serde_json::to_vec(&DeploymentRequest {
@@ -440,7 +637,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_get_deployment_not_found() {
-        let state: AppState = Arc::new(RwLock::new(HashMap::new()));
+        let state = create_test_state();
         let app = create_app(state);
 
         let response = app
@@ -459,7 +656,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_create_deployment_multi_region_alias() {
-        let state: AppState = Arc::new(RwLock::new(HashMap::new()));
+        let state = create_test_state();
         let app = create_app(state);
 
         let req_payload = serde_json::to_vec(&DeploymentRequest {
@@ -492,7 +689,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_create_deployment_invalid_region() {
-        let state: AppState = Arc::new(RwLock::new(HashMap::new()));
+        let state = create_test_state();
         let app = create_app(state);
 
         let req_payload = serde_json::to_vec(&DeploymentRequest {
@@ -523,11 +720,79 @@ mod tests {
         assert!(dep.error_message.unwrap().contains("Unsupported region"));
     }
 
+    #[tokio::test]
+    async fn test_circuit_breaker_max_ttl() {
+        let state = create_test_state();
+        let app = create_app(state);
+
+        let req_payload = serde_json::to_vec(&DeploymentRequest {
+            deployment_id: "warp-exceed-ttl".to_string(),
+            region: "us-east-1".to_string(),
+            ttl_minutes: 121, // Exceeds 120m cap
+            client_public_key: "dummy_client_key".to_string(),
+            admin_cidr: Some("0.0.0.0/0".to_string()),
+        })
+        .unwrap();
+
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/deployments")
+                    .header("content-type", "application/json")
+                    .body(Body::from(req_payload))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+        let body_bytes = response.into_body().collect().await.unwrap().to_bytes();
+        let dep: DeploymentResponse = serde_json::from_slice(&body_bytes).unwrap();
+        assert_eq!(dep.status, DeploymentStatus::Failed);
+        assert!(dep.error_message.unwrap().contains("Account quota exceeded: TTL must be between 1 and 120 minutes"));
+    }
+
+    #[tokio::test]
+    async fn test_circuit_breaker_max_concurrent_deployments() {
+        let state = create_test_state();
+        // Insert an active deployment already
+        let existing = create_test_deployment("warp-active-1", DeploymentStatus::Ready);
+        state.insert_deployment(&existing, 30, false).unwrap();
+
+        let app = create_app(state);
+
+        let req_payload = serde_json::to_vec(&DeploymentRequest {
+            deployment_id: "warp-second-dep".to_string(),
+            region: "us-east-1".to_string(),
+            ttl_minutes: 30,
+            client_public_key: "dummy_client_key".to_string(),
+            admin_cidr: Some("0.0.0.0/0".to_string()),
+        })
+        .unwrap();
+
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/deployments")
+                    .header("content-type", "application/json")
+                    .body(Body::from(req_payload))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::CONFLICT);
+        let body_bytes = response.into_body().collect().await.unwrap().to_bytes();
+        let dep: DeploymentResponse = serde_json::from_slice(&body_bytes).unwrap();
+        assert_eq!(dep.status, DeploymentStatus::Failed);
+        assert!(dep.error_message.unwrap().contains("Maximum 1 concurrent active deployment allowed"));
+    }
 
     #[tokio::test]
     async fn test_teardown_endpoint() {
-        let state: AppState = Arc::new(RwLock::new(HashMap::new()));
-
+        let state = create_test_state();
         let deployment = DeploymentResponse {
             deployment_id: "warp-test-td".to_string(),
             status: DeploymentStatus::Ready,
@@ -541,10 +806,7 @@ mod tests {
             admin_cidr: "192.168.1.10/32".to_string(),
         };
 
-        state
-            .write()
-            .await
-            .insert("warp-test-td".to_string(), deployment);
+        state.insert_deployment(&deployment, 30, false).unwrap();
 
         let app = create_app(Arc::clone(&state));
 
@@ -575,29 +837,16 @@ mod tests {
         assert_eq!(td_resp.status, DeploymentStatus::Terminating);
     }
 
-    fn create_test_deployment(id: &str, status: DeploymentStatus) -> DeploymentResponse {
-        DeploymentResponse {
-            deployment_id: id.to_string(),
-            status,
-            server_ip: Some("203.0.113.10".to_string()),
-            wireguard_port: Some(51820),
-            server_public_key: None,
-            client_ip: Some("10.200.0.2/32".to_string()),
-            dns_server: Some("1.1.1.1".to_string()),
-            error_message: None,
-            region: "us-east-1".to_string(),
-            admin_cidr: "192.168.1.10/32".to_string(),
-        }
-    }
-
     #[tokio::test]
     async fn test_ttl_expiry_dry_run_destroys_deployment() {
-        let state: AppState = Arc::new(RwLock::new(HashMap::new()));
-
-        state.write().await.insert(
-            "ttl-test-1".to_string(),
-            create_test_deployment("ttl-test-1", DeploymentStatus::Ready),
-        );
+        let state = create_test_state();
+        state
+            .insert_deployment(
+                &create_test_deployment("ttl-test-1", DeploymentStatus::Ready),
+                30,
+                true,
+            )
+            .unwrap();
 
         schedule_ttl_teardown(
             Arc::clone(&state),
@@ -610,21 +859,20 @@ mod tests {
 
         tokio::time::sleep(Duration::from_millis(100)).await;
 
-        let store = state.read().await;
-        assert_eq!(
-            store.get("ttl-test-1").unwrap().status,
-            DeploymentStatus::Destroyed
-        );
+        let dep = state.get_deployment("ttl-test-1").unwrap().unwrap();
+        assert_eq!(dep.status, DeploymentStatus::Destroyed);
     }
 
     #[tokio::test]
     async fn test_ttl_skips_non_ready_deployment() {
-        let state: AppState = Arc::new(RwLock::new(HashMap::new()));
-
-        state.write().await.insert(
-            "ttl-test-2".to_string(),
-            create_test_deployment("ttl-test-2", DeploymentStatus::Terminating),
-        );
+        let state = create_test_state();
+        state
+            .insert_deployment(
+                &create_test_deployment("ttl-test-2", DeploymentStatus::Terminating),
+                30,
+                true,
+            )
+            .unwrap();
 
         schedule_ttl_teardown(
             Arc::clone(&state),
@@ -637,39 +885,37 @@ mod tests {
 
         tokio::time::sleep(Duration::from_millis(100)).await;
 
-        let store = state.read().await;
-        assert_eq!(
-            store.get("ttl-test-2").unwrap().status,
-            DeploymentStatus::Terminating
-        );
+        let dep = state.get_deployment("ttl-test-2").unwrap().unwrap();
+        assert_eq!(dep.status, DeploymentStatus::Terminating);
     }
 
     #[tokio::test]
     async fn test_ttl_teardown_success() {
-        let state: AppState = Arc::new(RwLock::new(HashMap::new()));
-
-        state.write().await.insert(
-            "ttl-success".to_string(),
-            create_test_deployment("ttl-success", DeploymentStatus::Terminating),
-        );
+        let state = create_test_state();
+        state
+            .insert_deployment(
+                &create_test_deployment("ttl-success", DeploymentStatus::Terminating),
+                30,
+                true,
+            )
+            .unwrap();
 
         finish_teardown(&state, "ttl-success", Ok(())).await;
 
-        let store = state.read().await;
-        assert_eq!(
-            store.get("ttl-success").unwrap().status,
-            DeploymentStatus::Destroyed
-        );
+        let dep = state.get_deployment("ttl-success").unwrap().unwrap();
+        assert_eq!(dep.status, DeploymentStatus::Destroyed);
     }
 
     #[tokio::test]
     async fn test_ttl_teardown_failure() {
-        let state: AppState = Arc::new(RwLock::new(HashMap::new()));
-
-        state.write().await.insert(
-            "ttl-failure".to_string(),
-            create_test_deployment("ttl-failure", DeploymentStatus::Terminating),
-        );
+        let state = create_test_state();
+        state
+            .insert_deployment(
+                &create_test_deployment("ttl-failure", DeploymentStatus::Terminating),
+                30,
+                true,
+            )
+            .unwrap();
 
         finish_teardown(
             &state,
@@ -678,13 +924,10 @@ mod tests {
         )
         .await;
 
-        let store = state.read().await;
-        let deployment = store.get("ttl-failure").unwrap();
-
-        assert_eq!(deployment.status, DeploymentStatus::Failed);
+        let dep = state.get_deployment("ttl-failure").unwrap().unwrap();
+        assert_eq!(dep.status, DeploymentStatus::Failed);
         assert!(
-            deployment
-                .error_message
+            dep.error_message
                 .as_deref()
                 .unwrap()
                 .contains("Simulated Terraform failure")
@@ -693,7 +936,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_teardown_nonexistent_deployment() {
-        let state: AppState = Arc::new(RwLock::new(HashMap::new()));
+        let state = create_test_state();
         let app = create_app(state);
 
         let payload = serde_json::to_vec(&TeardownRequest {
@@ -719,12 +962,14 @@ mod tests {
 
     #[tokio::test]
     async fn test_teardown_already_terminating() {
-        let state: AppState = Arc::new(RwLock::new(HashMap::new()));
-
-        state.write().await.insert(
-            "already-terminating".to_string(),
-            create_test_deployment("already-terminating", DeploymentStatus::Terminating),
-        );
+        let state = create_test_state();
+        state
+            .insert_deployment(
+                &create_test_deployment("already-terminating", DeploymentStatus::Terminating),
+                30,
+                true,
+            )
+            .unwrap();
 
         let app = create_app(Arc::clone(&state));
 
@@ -747,5 +992,31 @@ mod tests {
             .unwrap();
 
         assert_eq!(response.status(), StatusCode::CONFLICT);
+    }
+
+    #[tokio::test]
+    async fn test_crash_recovery_resumes_active_and_cleans_expired() {
+        let state = create_test_state();
+
+        // 1. Deployment with future expiry
+        let future_dep = create_test_deployment("warp-future-1", DeploymentStatus::Ready);
+        state.insert_deployment(&future_dep, 60, true).unwrap();
+
+        // 2. Deployment that was stuck in provisioning
+        let stuck_dep = create_test_deployment("warp-stuck-1", DeploymentStatus::ProvisioningInfra);
+        state.insert_deployment(&stuck_dep, 30, true).unwrap();
+
+        recover_in_flight_deployments(&state).await;
+
+        tokio::time::sleep(Duration::from_millis(50)).await;
+
+        // stuck deployment should be rolled back to Failed
+        let recovered_stuck = state.get_deployment("warp-stuck-1").unwrap().unwrap();
+        assert_eq!(recovered_stuck.status, DeploymentStatus::Failed);
+        assert!(recovered_stuck.error_message.unwrap().contains("Interrupted by orchestrator restart"));
+
+        // future deployment remains Ready
+        let recovered_future = state.get_deployment("warp-future-1").unwrap().unwrap();
+        assert_eq!(recovered_future.status, DeploymentStatus::Ready);
     }
 }
