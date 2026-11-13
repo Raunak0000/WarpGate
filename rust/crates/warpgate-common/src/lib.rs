@@ -84,6 +84,23 @@ pub fn normalize_region(input: &str) -> Result<&'static str, String> {
     }
 }
 
+/// Returns a human-friendly common city alias for a canonical AWS region identifier.
+pub fn canonical_to_alias(region: &str) -> Option<&'static str> {
+    match region.trim().to_ascii_lowercase().as_str() {
+        "us-east-1" => Some("virginia"),
+        "us-east-2" => Some("ohio"),
+        "us-west-1" => Some("california"),
+        "us-west-2" => Some("oregon"),
+        "eu-central-1" => Some("frankfurt"),
+        "eu-west-1" => Some("ireland"),
+        "eu-west-2" => Some("london"),
+        "ap-northeast-1" => Some("tokyo"),
+        "ap-southeast-1" => Some("singapore"),
+        "ap-south-1" => Some("mumbai"),
+        _ => None,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

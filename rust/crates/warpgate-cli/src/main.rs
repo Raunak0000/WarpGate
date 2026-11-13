@@ -21,7 +21,7 @@ struct Cli {
     api_url: String,
 
     #[command(subcommand)]
-    command: Commands,
+    command: Option<Commands>,
 }
 
 #[derive(Subcommand)]
@@ -95,6 +95,24 @@ enum Commands {
         #[arg(long, default_value_t = 2)]
         max_age_hours: u32,
     },
+
+    /// Run system diagnostics and verify environment readiness
+    Doctor,
+
+    /// Generate shell autocompletion scripts (bash, zsh, fish, powershell)
+    Completions {
+        /// Target shell
+        #[arg(value_enum)]
+        shell: clap_complete::Shell,
+    },
+
+    /// Run the WarpGate background orchestrator daemon directly
+    #[command(hide = true)]
+    Daemon {
+        /// Port to listen on
+        #[arg(short, long, default_value_t = 3000)]
+        port: u16,
+    },
 }
 
 #[tokio::main]
@@ -102,7 +120,29 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let cli = Cli::parse();
     let client = reqwest::Client::new();
 
-    match cli.command {
+    let Some(command) = cli.command else {
+        run_doctor_and_welcome(&client, &cli.api_url).await?;
+        return Ok(());
+    };
+
+    match command {
+        Commands::Daemon { port } => {
+            warpgate_orchestrator::run_server(port).await?;
+            return Ok(());
+        }
+
+        Commands::Doctor => {
+            run_doctor_and_welcome(&client, &cli.api_url).await?;
+            return Ok(());
+        }
+
+        Commands::Completions { shell } => {
+            use clap::CommandFactory;
+            let mut cmd = Cli::command();
+            clap_complete::generate(shell, &mut cmd, "warpgate", &mut std::io::stdout());
+            return Ok(());
+        }
+
         Commands::Up {
             region,
             ttl,
@@ -390,15 +430,15 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                             } else if let Some(last) = deps.last() {
                                 last.deployment_id.clone()
                             } else {
-                                println!("No active deployments found.");
+                                print_idle_status_card();
                                 return Ok(());
                             }
                         } else {
-                            println!("No active deployments found.");
+                            print_idle_status_card();
                             return Ok(());
                         }
                     } else {
-                        println!("No active deployments found.");
+                        print_idle_status_card();
                         return Ok(());
                     }
                 }
@@ -410,12 +450,12 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 .await?;
 
             if res.status().as_u16() == 404 {
-                println!("Deployment '{}' not found.", target_id);
+                print_idle_status_card();
                 return Ok(());
             }
 
             let dep: DeploymentResponse = res.json().await?;
-            println!("{:#?}", dep);
+            print_status_card(&dep);
         }
 
         Commands::Down {
@@ -801,20 +841,12 @@ async fn ensure_backend_available(
     // 3. Auto-spawn local orchestrator daemon
     println!("No running WarpGate backend found; starting local Orchestrator daemon in background...");
 
-    let binary = match find_orchestrator_binary() {
-        Some(b) => b,
-        None => {
-            println!("Building warpgate-orchestrator...");
-            let build_status = std::process::Command::new("cargo")
-                .args(["build", "--bin", "warpgate-orchestrator"])
-                .status();
-            if build_status.map(|s| s.success()).unwrap_or(false) {
-                find_orchestrator_binary()
-                    .ok_or("Could not locate warpgate-orchestrator binary after build")?
-            } else {
-                return Err("warpgate-orchestrator binary not found. Please run 'cargo build' first.".into());
-            }
-        }
+    let (binary, args): (PathBuf, Vec<String>) = if let Ok(current_exe) = std::env::current_exe() {
+        (current_exe, vec!["daemon".to_string(), "--port".to_string(), "3000".to_string()])
+    } else if let Some(b) = find_orchestrator_binary() {
+        (b, vec![])
+    } else {
+        return Err("Could not locate warpgate binary to spawn daemon. Please ensure warpgate is installed in PATH.".into());
     };
 
     let state_dir = PathBuf::from(".warpgate");
@@ -822,6 +854,7 @@ async fn ensure_backend_available(
     let log_file = std::fs::File::create(state_dir.join("orchestrator.log"))?;
 
     let mut cmd = std::process::Command::new(&binary);
+    cmd.args(&args);
     cmd.stdout(log_file.try_clone()?);
     cmd.stderr(log_file);
 
@@ -1088,6 +1121,161 @@ fn display_connection_info(
     }
 }
 
+fn print_status_card(dep: &DeploymentResponse) {
+    let friendly_region = warpgate_common::canonical_to_alias(&dep.region).unwrap_or(&dep.region);
+    let server_endpoint = match (&dep.server_ip, dep.wireguard_port) {
+        (Some(ip), Some(port)) => format!("{}:{}", ip, port),
+        (Some(ip), None) => format!("{}:51820", ip),
+        _ => "Pending allocation...".to_string(),
+    };
+    let status_str = match dep.status {
+        DeploymentStatus::Ready => "READY (Active & Connected)",
+        DeploymentStatus::ProvisioningInfra => "PROVISIONING INFRASTRUCTURE",
+        DeploymentStatus::ConfiguringVpn => "CONFIGURING WIREGUARD & BBR",
+        DeploymentStatus::Terminating => "TERMINATING",
+        DeploymentStatus::Destroyed => "DESTROYED",
+        DeploymentStatus::Failed => "FAILED",
+        DeploymentStatus::Pending => "PENDING",
+    };
+
+    println!("╭─────────────────────────────────────────────────────────────╮");
+    println!("│  WARPGATE VPN STATUS DASHBOARD                              │");
+    println!("├─────────────────────────────────────────────────────────────┤");
+    println!("│  Status:        {:<44}│", status_str);
+    println!("│  Deployment ID: {:<44}│", dep.deployment_id);
+    println!("│  Region:        {:<44}│", format!("{} ({})", dep.region, friendly_region));
+    println!("│  Server IP:     {:<44}│", server_endpoint);
+    println!("│  Internal IP:   {:<44}│", dep.client_ip.as_deref().unwrap_or("10.200.0.2/32"));
+    println!("│  DNS Resolver:  {:<44}│", dep.dns_server.as_deref().unwrap_or("1.1.1.1, 10.200.0.1"));
+    println!("│  SSH Access:    {:<44}│", dep.admin_cidr);
+    if let Some(ref err) = dep.error_message {
+        let truncated = if err.len() > 44 { &err[..44] } else { err };
+        println!("│  Notice:        {:<44}│", truncated);
+    }
+    println!("╰─────────────────────────────────────────────────────────────╯");
+}
+
+fn print_idle_status_card() {
+    println!("╭─────────────────────────────────────────────────────────────╮");
+    println!("│  WARPGATE STATUS: IDLE                                      │");
+    println!("├─────────────────────────────────────────────────────────────┤");
+    println!("│  No active WarpGate deployments running.                    │");
+    println!("│                                                             │");
+    println!("│  To spin up a secure ephemeral VPN:                         │");
+    println!("│    warpgate up --region tokyo                               │");
+    println!("│    warpgate up --region frankfurt --ttl 1h                  │");
+    println!("╰─────────────────────────────────────────────────────────────╯");
+}
+
+async fn run_doctor_and_welcome(
+    client: &reqwest::Client,
+    api_url: &str,
+) -> Result<(), Box<dyn std::error::Error>> {
+    println!("============================================================");
+    println!("         WarpGate - Ephemeral Zero-Cost Cloud VPN           ");
+    println!("============================================================\n");
+    println!("System & Environment Readiness Diagnostics:\n");
+
+    // 1. OS & Architecture
+    println!(
+        "  [✓] Platform:            {} ({})",
+        std::env::consts::OS,
+        std::env::consts::ARCH
+    );
+
+    // 2. WireGuard kernel / client
+    let has_nmcli = std::process::Command::new("which")
+        .arg("nmcli")
+        .output()
+        .map(|o| o.status.success())
+        .unwrap_or(false);
+    let has_wg_quick = std::process::Command::new("which")
+        .arg("wg-quick")
+        .output()
+        .map(|o| o.status.success())
+        .unwrap_or(false);
+    if has_nmcli {
+        println!("  [✓] VPN Connection Mgr:  NetworkManager (nmcli)");
+    } else if has_wg_quick {
+        println!("  [✓] VPN Connection Mgr:  WireGuard Tools (wg-quick)");
+    } else {
+        println!("  [!] VPN Connection Mgr:  Neither 'nmcli' nor 'wg-quick' found in PATH");
+        println!("      -> Install WireGuard tools: 'sudo apt install wireguard-tools'");
+    }
+
+    // 3. AWS Credentials
+    let has_aws_env =
+        std::env::var("AWS_ACCESS_KEY_ID").is_ok() || std::env::var("AWS_PROFILE").is_ok();
+    let has_aws_cli = std::process::Command::new("aws")
+        .arg("sts")
+        .arg("get-caller-identity")
+        .output()
+        .map(|o| o.status.success())
+        .unwrap_or(false);
+    if has_aws_cli {
+        println!("  [✓] AWS Cloud Identity:  Active credentials detected via AWS CLI");
+    } else if has_aws_env {
+        println!("  [✓] AWS Cloud Identity:  Environment credentials detected ($AWS_ACCESS_KEY_ID)");
+    } else {
+        println!("  [!] AWS Cloud Identity:  No active AWS credentials found");
+        println!("      -> Run 'aws configure' or export AWS_ACCESS_KEY_ID & AWS_SECRET_ACCESS_KEY");
+    }
+
+    // 4. Terraform
+    let terraform_version = std::process::Command::new("terraform")
+        .arg("version")
+        .output();
+    if let Ok(out) = terraform_version {
+        if out.status.success() {
+            let ver = String::from_utf8_lossy(&out.stdout)
+                .lines()
+                .next()
+                .unwrap_or("Installed")
+                .to_string();
+            println!("  [✓] Infrastructure:      {}", ver);
+        } else {
+            println!("  [!] Infrastructure:      Terraform installed but returned an error");
+        }
+    } else {
+        println!("  [!] Infrastructure:      'terraform' not found in PATH");
+        println!("      -> Download from: https://developer.hashicorp.com/terraform/install");
+    }
+
+    // 5. Ansible
+    let has_ansible = std::process::Command::new("ansible-playbook")
+        .arg("--version")
+        .output()
+        .map(|o| o.status.success())
+        .unwrap_or(false);
+    if has_ansible {
+        println!("  [✓] Config Engine:       Ansible playbook detected");
+    } else {
+        println!("  [!] Config Engine:       'ansible-playbook' not found in PATH");
+        println!("      -> Install via: 'sudo apt install ansible' or 'pip install ansible'");
+    }
+
+    // 6. Backend / Daemon connectivity
+    let backend_active = is_url_reachable(client, api_url).await
+        || is_url_reachable(client, "http://localhost:3000").await;
+    if backend_active {
+        println!("  [✓] WarpGate Daemon:     Active and listening");
+    } else {
+        println!("  [✓] WarpGate Daemon:     Idle (will auto-spawn on 'warpgate up')");
+    }
+
+    println!("\nQuick Start Commands:");
+    println!("  warpgate up                       Spin up ephemeral VPN (defaults to us-east-1, 30m TTL)");
+    println!("  warpgate up --region tokyo        Spin up VPN in Tokyo (ap-northeast-1)");
+    println!("  warpgate up --ttl 1h --detach     Spin up in detached background mode for 1 hour");
+    println!("  warpgate status                   View active connection metrics and details");
+    println!("  warpgate down                     Disconnect and tear down active VPN");
+    println!("  warpgate sweep                    Audit and terminate any orphaned cloud resources");
+    println!("  warpgate completions zsh          Generate shell completions for tab-complete");
+    println!("  warpgate --help                   View full command line reference\n");
+
+    Ok(())
+}
+
 pub fn connect_local_vpn(conf_path: &std::path::Path, conn_name: &str) -> Result<(), String> {
     // 1. Try NetworkManager (nmcli)
     let nmcli_check = std::process::Command::new("which").arg("nmcli").output();
@@ -1242,7 +1430,7 @@ mod tests {
     fn test_cli_parsing_up_defaults() {
         let cli = Cli::try_parse_from(["warpgate", "up"]).unwrap();
 
-        match cli.command {
+        match cli.command.unwrap() {
             Commands::Up {
                 region,
                 ttl,
@@ -1278,7 +1466,7 @@ mod tests {
         ])
         .unwrap();
 
-        match cli.command {
+        match cli.command.unwrap() {
             Commands::Up {
                 region,
                 ttl,
@@ -1302,7 +1490,7 @@ mod tests {
         let cli = Cli::try_parse_from(["warpgate", "down", "warp-998877", "--region", "us-west-2"])
             .unwrap();
 
-        match cli.command {
+        match cli.command.unwrap() {
             Commands::Down {
                 id,
                 region,
@@ -1317,7 +1505,7 @@ mod tests {
 
         // Test down with no arguments
         let cli_no_args = Cli::try_parse_from(["warpgate", "down"]).unwrap();
-        match cli_no_args.command {
+        match cli_no_args.command.unwrap() {
             Commands::Down {
                 id,
                 region,
@@ -1335,7 +1523,7 @@ mod tests {
     fn test_cli_parsing_status() {
         let cli = Cli::try_parse_from(["warpgate", "status", "warp-112233"]).unwrap();
 
-        match cli.command {
+        match cli.command.unwrap() {
             Commands::Status { id } => {
                 assert_eq!(id, Some("warp-112233".to_string()));
             }
@@ -1344,7 +1532,7 @@ mod tests {
 
         // Test status with no arguments
         let cli_no_args = Cli::try_parse_from(["warpgate", "status"]).unwrap();
-        match cli_no_args.command {
+        match cli_no_args.command.unwrap() {
             Commands::Status { id } => {
                 assert!(id.is_none());
             }
@@ -1366,7 +1554,7 @@ mod tests {
         ])
         .unwrap();
 
-        match cli.command {
+        match cli.command.unwrap() {
             Commands::Sweep {
                 regions,
                 dry_run,
@@ -1396,11 +1584,38 @@ mod tests {
     fn test_cli_parsing_up_detach() {
         let cli = Cli::try_parse_from(["warpgate", "up", "--detach"]).unwrap();
 
-        match cli.command {
+        match cli.command.unwrap() {
             Commands::Up { detach, .. } => {
                 assert!(detach);
             }
             _ => panic!("Expected Up command"),
+        }
+    }
+
+    #[test]
+    fn test_cli_parsing_bare_no_args() {
+        let cli = Cli::try_parse_from(["warpgate"]).unwrap();
+        assert!(cli.command.is_none());
+    }
+
+    #[test]
+    fn test_cli_parsing_doctor() {
+        let cli = Cli::try_parse_from(["warpgate", "doctor"]).unwrap();
+        assert!(matches!(cli.command, Some(Commands::Doctor)));
+    }
+
+    #[test]
+    fn test_cli_parsing_completions() {
+        let cli = Cli::try_parse_from(["warpgate", "completions", "zsh"]).unwrap();
+        assert!(matches!(cli.command, Some(Commands::Completions { .. })));
+    }
+
+    #[test]
+    fn test_cli_parsing_daemon() {
+        let cli = Cli::try_parse_from(["warpgate", "daemon", "--port", "3500"]).unwrap();
+        match cli.command.unwrap() {
+            Commands::Daemon { port } => assert_eq!(port, 3500),
+            _ => panic!("Expected Daemon command"),
         }
     }
 

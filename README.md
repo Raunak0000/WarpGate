@@ -65,44 +65,70 @@ Before deploying live cloud gateways, ensure you have:
 
 ---
 
-## 🚀 Quick Start
+## 🚀 Installation & Quick Start
 
-### 1. Launch the Orchestrator
+### 1. One-Line Universal Install
 
-Start the asynchronous orchestration engine on `http://localhost:3000`:
+Install the standalone `warpgate` binary instantly (Linux / macOS):
 
 ```bash
-cargo run --manifest-path rust/Cargo.toml --bin warpgate-orchestrator
+curl -fsSL https://raw.githubusercontent.com/Raunak0000/WarpGate/main/install.sh | bash
 ```
 
-### 2. Provision a VPN Gateway
+Or install from source with Cargo:
+```bash
+cargo install --path rust/crates/warpgate-cli
+```
 
-In a separate terminal, deploy a temporary gateway:
+### 2. Verify Your Environment
+
+Run `warpgate` with no arguments to run the system readiness check and view the quick-start guide:
 
 ```bash
-# Provision a gateway in Tokyo with a 30-minute TTL, restricting SSH to your public IP
-cargo run --manifest-path rust/Cargo.toml --bin warpgate-cli -- up \
-  --region tokyo \
-  --ttl 30m \
-  --admin-cidr "$(curl -s https://api.ipify.org)/32"
+warpgate
+```
+
+```text
+============================================================
+         WarpGate - Ephemeral Zero-Cost Cloud VPN           
+============================================================
+
+System & Environment Readiness Diagnostics:
+
+  [✓] Platform:            linux (x86_64)
+  [✓] VPN Connection Mgr:  NetworkManager (nmcli)
+  [✓] AWS Cloud Identity:  Active credentials detected via AWS CLI
+  [✓] Infrastructure:      Terraform v1.15.9
+  [✓] Config Engine:       Ansible playbook detected
+  [✓] WarpGate Daemon:     Idle (will auto-spawn on 'warpgate up')
+```
+
+### 3. Spin Up an Ephemeral VPN Gateway
+
+```bash
+# Provision a gateway in Tokyo with a 30-minute TTL (auto-detects public IP & auto-connects)
+warpgate up --region tokyo --ttl 30m
 ```
 
 Once provisioning completes:
-1. The terminal displays a **QR code**—scan it with the [WireGuard mobile app](https://www.wireguard.com/install/).
-2. On Linux laptops, your network connects automatically via NetworkManager.
+1. The terminal displays a **QR code**—scan it with the [WireGuard mobile app](https://www.wireguard.com/install/) to connect your phone.
+2. On Linux laptops, your network connects automatically via NetworkManager (`nmcli`) or `wg-quick`.
+3. The background orchestrator daemon is automatically spawned and managed for you.
 
-### 3. Check Status
+### 4. Check Connection Status
+
+View the live terminal status dashboard at any time (no deployment ID needed):
 
 ```bash
-cargo run --manifest-path rust/Cargo.toml --bin warpgate-cli -- status <deployment-id>
+warpgate status
 ```
 
-### 4. Teardown on Demand
+### 5. Teardown on Demand
 
-When you are finished, destroy the infrastructure immediately (otherwise it auto-destructs when the TTL expires):
+When finished, tear down the infrastructure and disconnect with one command (or simply let the TTL auto-destruct it):
 
 ```bash
-cargo run --manifest-path rust/Cargo.toml --bin warpgate-cli -- down <deployment-id> --region tokyo
+warpgate down
 ```
 
 ---
@@ -112,11 +138,14 @@ cargo run --manifest-path rust/Cargo.toml --bin warpgate-cli -- down <deployment
 To test WarpGate's CLI workflow and simulated lifecycle without an AWS account:
 
 ```bash
-# 1. Start the orchestrator with dry-run enabled
-WARPGATE_DRY_RUN=1 cargo run --manifest-path rust/Cargo.toml --bin warpgate-orchestrator
+# Spin up in simulated dry-run mode (detached background session)
+WARPGATE_DRY_RUN=1 warpgate up --region tokyo --ttl 5m --no-connect --detach
 
-# 2. In another terminal, run the automated walkthrough demo
-./scripts/demo_walkthrough.sh
+# Check status
+warpgate status
+
+# Clean teardown
+WARPGATE_DRY_RUN=1 warpgate down
 ```
 
 ---
@@ -124,21 +153,25 @@ WARPGATE_DRY_RUN=1 cargo run --manifest-path rust/Cargo.toml --bin warpgate-orch
 ## 💻 CLI Reference
 
 ```
-Usage: warpgate-cli [OPTIONS] <COMMAND>
+Usage: warpgate [OPTIONS] [COMMAND]
 
 Commands:
-  up       Provision a new ephemeral WireGuard VPN node
-  status   Check status of an active deployment
-  down     Terminate and destroy a deployment immediately
+  up           Provision a new ephemeral WireGuard VPN node
+  status       Check status of an active deployment (or active node if omitted)
+  down         Terminate and destroy a deployment immediately (auto-detects active node)
+  sweep        Scan for and sweep orphaned cloud infrastructure and lingering Elastic IPs
+  doctor       Run system diagnostics and verify environment readiness
+  completions  Generate shell autocompletion scripts (bash, zsh, fish, powershell)
 ```
 
-### `warpgate-cli up` Options
+### `warpgate up` Options
 
 | Flag | Description | Default |
 | :--- | :--- | :--- |
 | `-r, --region <REGION>` | Target AWS region or alias (`tokyo`, `frankfurt`, `us-east-1`, etc.) | `us-east-1` |
 | `-t, --ttl <DURATION>` | Time-to-Live before automated teardown (`15m`, `30m`, `1h`) | `30m` |
-| `--admin-cidr <CIDR>` | Allowed IPv4 CIDR for administrative SSH access | *Required* |
+| `--admin-cidr <CIDR>` | Allowed IPv4 CIDR for administrative SSH access | *Auto-detected* |
+| `-d, --detach` | Run in detached background mode (non-blocking) | `false` |
 | `-o, --output <PATH>` | Save generated client `wg0.conf` configuration to a specific file | Optional |
 | `--no-connect` | Skip automatically connecting local laptop to the VPN tunnel | `false` |
 
