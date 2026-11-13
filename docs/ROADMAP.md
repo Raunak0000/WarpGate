@@ -6,7 +6,7 @@
 | :--- | :--- | :---: | :--- |
 | **Phase 1** | Infrastructure & Data Plane Proof of Concept | **Completed** | Weeks 1–3 |
 | **Phase 2** | Orchestration, Control Plane & Core Polishing | **Completed** | Weeks 4–6 |
-| **Phase 3** | Resilience, Free-Tier Guardrails & Durable State | **In Progress** | Weeks 7–8 |
+| **Phase 3** | Resilience, Free-Tier Guardrails & Durable State | **Completed** | Weeks 7–8 |
 | **Phase 4** | Zero-Cost Auth, Virtual Quotas & Multi-Device Networking | **Upcoming** | Weeks 9–10 |
 
 ---
@@ -53,19 +53,19 @@
 
 ---
 
-## Phase 3: Resilience, Free-Tier Guardrails & Durable State (Weeks 7–8) — 🔄 IN PROGRESS
+## Phase 3: Resilience, Free-Tier Guardrails & Durable State (Weeks 7–8) — ✅ COMPLETED
 
 - **Week 7: AWS Free-Tier Cost Guardrails & Zombie Protection**
-  - [ ] **KMS Zero-Cost Optimization:** Replace Customer-Managed KMS key in `vpn_node/main.tf` with default AWS-managed CloudWatch encryption to eliminate the $1.00/month CMK charge.
-  - [ ] **Account Quota Circuit Breaker:** Add hard safety caps (maximum 1 concurrent active instance, maximum 2h TTL) to ensure zero unexpected billing on AWS Free Tier.
-  - [ ] **Orphan Sweeper Daemon (`warpgate sweep`):** Create a standalone sweeper script / CLI command that queries AWS API across regions for instances tagged `Role=vpn` whose TTL expired, automatically terminating orphaned EC2 nodes and Elastic IPs.
-  - [ ] **Partial Failure Rollback:** Automatically trigger `terraform destroy` if SSH polling or Ansible playbook execution fails, preventing half-provisioned lingering instances.
+  - [x] **KMS Zero-Cost Optimization:** Replace Customer-Managed KMS key in `vpn_node/main.tf` with default AWS-managed CloudWatch encryption to eliminate the $1.00/month CMK charge.
+  - [x] **Account Quota Circuit Breaker:** Add hard safety caps (maximum 1 concurrent active instance, maximum 2h TTL) to ensure zero unexpected billing on AWS Free Tier.
+  - [x] **Orphan Sweeper Daemon (`warpgate sweep`):** Create a standalone sweeper script / CLI command that queries AWS API across regions for instances tagged `Role=vpn` whose TTL expired, automatically terminating orphaned EC2 nodes and Elastic IPs.
+  - [x] **Partial Failure Rollback:** Automatically trigger `terraform destroy` if SSH polling or Ansible playbook execution fails, preventing half-provisioned lingering instances.
 
 - **Week 8: Durable State & Crash Recovery**
-  - [ ] **Persistent Orchestrator State:** Migrate Rust orchestrator from in-memory `HashMap` to a durable local SQLite or PostgreSQL store.
-  - [ ] **Orchestrator Crash Recovery:** On engine restart, scan the persistent state and active `.warpgate/deployments/` directories, resuming TTL teardown timers for in-flight nodes.
-  - [ ] **Unified Control Plane Routing:** Direct CLI traffic through the Spring Boot control plane (port 8080) by default, using the Rust engine as the internal worker plane.
-  - [ ] **Lifecycle Webhooks:** Emit state updates from Rust to Spring Boot so database records sync in real time when background TTL timers expire.
+  - [x] **Persistent Orchestrator State:** Migrate Rust orchestrator from in-memory `HashMap` to a durable local SQLite store (`.warpgate/orchestrator.db`) with WAL mode.
+  - [x] **Orchestrator Crash Recovery:** On engine restart, scan the persistent state and active `.warpgate/deployments/` directories, resuming TTL teardown timers for in-flight nodes and rolling back interrupted ones.
+  - [x] **Unified Control Plane Routing:** Direct CLI traffic through the Spring Boot control plane (port 8080) by default, using the Rust engine as the internal worker plane.
+  - [x] **Lifecycle Webhooks:** Emit state updates from Rust to Spring Boot (`/api/deployments/{id}/webhook`) so database records sync in real time when background TTL timers expire.
 
 ---
 
