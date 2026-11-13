@@ -58,4 +58,13 @@ public class DeploymentController {
         return ResponseEntity.ok(
                 deploymentService.teardownDeployment(id, payload));
     }
+
+    @PostMapping("/{id}/webhook")
+    public ResponseEntity<Void> receiveWebhook(
+            @PathVariable String id,
+            @RequestBody JsonNode payload) {
+
+        deploymentService.updateDeploymentFromWebhook(id, payload);
+        return ResponseEntity.ok().build();
+    }
 }

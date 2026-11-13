@@ -74,6 +74,34 @@ public class DeploymentControllerTest {
     }
 
     @Test
+    void testCreateDeploymentExceedsMaxTtl() throws Exception {
+        DeploymentRequest exceedRequest = new DeploymentRequest();
+        exceedRequest.setDeploymentId("warp-exceed");
+        exceedRequest.setRegion("us-east-1");
+        exceedRequest.setTtlMinutes(121); // Exceeds 120m max
+        exceedRequest.setClientPublicKey("dummyPublicKey=");
+        exceedRequest.setAdminCidr("0.0.0.0/0");
+
+        mockMvc.perform(post("/api/deployments")
+                .contentType(MediaType.APPLICATION_JSON)
+                .content(objectMapper.writeValueAsString(exceedRequest)))
+                .andExpect(status().isBadRequest());
+    }
+
+    @Test
+    void testReceiveWebhookSuccess() throws Exception {
+        ObjectNode webhookPayload = objectMapper.createObjectNode();
+        webhookPayload.put("status", "READY");
+
+        mockMvc.perform(post("/api/deployments/warp-test-1/webhook")
+                .contentType(MediaType.APPLICATION_JSON)
+                .content(objectMapper.writeValueAsString(webhookPayload)))
+                .andExpect(status().isOk());
+
+        Mockito.verify(deploymentService).updateDeploymentFromWebhook(eq("warp-test-1"), any());
+    }
+
+    @Test
     void testGetDeploymentSuccess() throws Exception {
         ObjectNode responseNode = objectMapper.createObjectNode();
         responseNode.put("deployment_id", "warp-test-1");

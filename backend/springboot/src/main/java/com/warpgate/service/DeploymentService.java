@@ -133,4 +133,14 @@ public class DeploymentService {
     public List<Deployment> getAllDeployments() {
         return deploymentRepository.findAll();
     }
+
+    public void updateDeploymentFromWebhook(String id, JsonNode payload) {
+        if (payload != null && payload.has("status")) {
+            String status = payload.get("status").asText();
+            deploymentRepository.findByDeploymentId(id).ifPresent(dep -> {
+                dep.setStatus(status);
+                deploymentRepository.save(dep);
+            });
+        }
+    }
 }
