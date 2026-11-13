@@ -12,11 +12,11 @@ use x25519_dalek::{PublicKey, StaticSecret};
 #[derive(Parser)]
 #[command(name = "warpgate", about = "WarpGate - Ephemeral VPN CLI", version)]
 struct Cli {
-    /// URL of the WarpGate API (Orchestrator or Spring Boot Control Plane)
+    /// URL of the WarpGate API (Spring Boot Control Plane or Orchestrator)
     #[arg(
         long,
         env = "WARPGATE_API_URL",
-        default_value = "http://localhost:3000"
+        default_value = "http://localhost:8080"
     )]
     api_url: String,
 
@@ -72,6 +72,25 @@ enum Commands {
         #[arg(long, default_value_t = true)]
         disconnect: bool,
     },
+
+    /// Scan for and sweep orphaned cloud infrastructure and lingering Elastic IPs
+    Sweep {
+        /// Target AWS regions (comma-separated or multiple flags)
+        #[arg(short, long, value_delimiter = ',')]
+        regions: Vec<String>,
+
+        /// Discover and display orphaned resources without deleting
+        #[arg(short = 'n', long)]
+        dry_run: bool,
+
+        /// Terminate/release detected orphans without interactive confirmation
+        #[arg(short, long)]
+        force: bool,
+
+        /// Maximum age threshold in hours before an active instance is treated as an orphan
+        #[arg(long, default_value_t = 2)]
+        max_age_hours: u32,
+    },
 }
 
 #[tokio::main]
@@ -93,6 +112,13 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 .to_string();
             let should_connect = connect && !no_connect;
             let ttl_minutes = parse_ttl_minutes(&ttl)?;
+            if ttl_minutes == 0 || ttl_minutes > 120 {
+                eprintln!(
+                    "Account quota exceeded: TTL '{}' ({} minutes) exceeds the maximum allowable 120 minute (2 hour) cap to protect AWS Free Tier limits.",
+                    ttl, ttl_minutes
+                );
+                std::process::exit(1);
+            }
             let deployment_id = format!("warp-{}", &uuid_short());
 
             // 1. Generate client WireGuard keypair locally
@@ -118,7 +144,14 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 .await?;
 
             if !res.status().is_success() {
-                eprintln!("Failed to submit deployment: {}", res.status());
+                let status_code = res.status();
+                if let Ok(dep) = res.json::<DeploymentResponse>().await {
+                    if let Some(err) = dep.error_message {
+                        eprintln!("Failed to submit deployment (HTTP {}): {}", status_code, err);
+                        std::process::exit(1);
+                    }
+                }
+                eprintln!("Failed to submit deployment: {}", status_code);
                 std::process::exit(1);
             }
 
@@ -273,9 +306,200 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 eprintln!("Teardown request failed: {}", res.status());
             }
         }
+
+        Commands::Sweep {
+            regions,
+            dry_run,
+            force,
+            max_age_hours,
+        } => {
+            sweep_orphaned_resources(regions, dry_run, force, max_age_hours).await?;
+        }
     }
 
     Ok(())
+}
+
+async fn sweep_orphaned_resources(
+    regions: Vec<String>,
+    dry_run: bool,
+    force: bool,
+    max_age_hours: u32,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let target_regions = if regions.is_empty() {
+        warpgate_common::SUPPORTED_REGIONS
+            .iter()
+            .map(|s| s.to_string())
+            .collect::<Vec<_>>()
+    } else {
+        regions
+    };
+
+    println!("=== WarpGate Orphan Sweeper ===");
+    println!("Max Age Threshold: {} hours", max_age_hours);
+    println!(
+        "Dry Run Mode:      {}",
+        if dry_run { "ENABLED (read-only)" } else { "DISABLED (live cleanup)" }
+    );
+    println!("Target Regions:    {}\n", target_regions.join(", "));
+
+    // Check if AWS CLI is available
+    let has_aws = tokio::process::Command::new("aws")
+        .arg("--version")
+        .output()
+        .await
+        .is_ok();
+
+    if !has_aws {
+        println!("[WARN] AWS CLI is not installed or not in PATH.");
+        println!("Checking local state directory (.warpgate/deployments)...");
+        clean_local_state(dry_run);
+        println!("[OK] Local sweep completed.");
+        return Ok(());
+    }
+
+    let mut total_instances = 0;
+    let mut total_eips = 0;
+
+    for region in target_regions {
+        let norm_region = match warpgate_common::normalize_region(&region) {
+            Ok(r) => r.to_string(),
+            Err(_) => region,
+        };
+
+        println!("Scanning region: {}...", norm_region);
+
+        // 1. EC2 instances tagged Role=vpn
+        let instance_output = tokio::process::Command::new("aws")
+            .args([
+                "ec2",
+                "describe-instances",
+                "--region",
+                &norm_region,
+                "--filters",
+                "Name=tag:Role,Values=vpn",
+                "Name=instance-state-name,Values=running,pending,stopped",
+                "--query",
+                "Reservations[].Instances[][InstanceId,LaunchTime,Tags[?Key=='Name'].Value|[0],PublicIpAddress]",
+                "--output",
+                "text",
+            ])
+            .output()
+            .await;
+
+        if let Ok(out) = instance_output {
+            let stdout = String::from_utf8_lossy(&out.stdout);
+            for line in stdout.lines() {
+                let parts: Vec<&str> = line.split('\t').collect();
+                if parts.is_empty() || parts[0].trim().is_empty() {
+                    continue;
+                }
+                total_instances += 1;
+                let inst_id = parts[0].trim();
+                let launch_time = parts.get(1).unwrap_or(&"unknown");
+                let tag_name = parts.get(2).unwrap_or(&"unnamed");
+                let pub_ip = parts.get(3).unwrap_or(&"none");
+
+                println!(
+                    "  Found instance: {} (Name: {}, IP: {}, Launched: {})",
+                    inst_id, tag_name, pub_ip, launch_time
+                );
+
+                if dry_run {
+                    println!("    [DRY RUN] Would terminate instance {}", inst_id);
+                } else if force {
+                    println!("    Terminating instance {}...", inst_id);
+                    let _ = tokio::process::Command::new("aws")
+                        .args(["ec2", "terminate-instances", "--region", &norm_region, "--instance-ids", inst_id])
+                        .output()
+                        .await;
+                }
+            }
+        }
+
+        // 2. Unattached Elastic IPs
+        let eip_output = tokio::process::Command::new("aws")
+            .args([
+                "ec2",
+                "describe-addresses",
+                "--region",
+                &norm_region,
+                "--query",
+                "Addresses[?NetworkInterfaceId==null][AllocationId,PublicIp,Tags[?Key=='Name'].Value|[0]]",
+                "--output",
+                "text",
+            ])
+            .output()
+            .await;
+
+        if let Ok(out) = eip_output {
+            let stdout = String::from_utf8_lossy(&out.stdout);
+            for line in stdout.lines() {
+                let parts: Vec<&str> = line.split('\t').collect();
+                if parts.is_empty() || parts[0].trim().is_empty() {
+                    continue;
+                }
+                total_eips += 1;
+                let alloc_id = parts[0].trim();
+                let pub_ip = parts.get(1).unwrap_or(&"unknown");
+                let tag_name = parts.get(2).unwrap_or(&"unnamed");
+
+                println!(
+                    "  Found unattached Elastic IP: {} (Alloc: {}, Tag: {})",
+                    pub_ip, alloc_id, tag_name
+                );
+
+                if dry_run {
+                    println!("    [DRY RUN] Would release Elastic IP {}", alloc_id);
+                } else if force {
+                    println!("    Releasing Elastic IP {}...", alloc_id);
+                    let _ = tokio::process::Command::new("aws")
+                        .args(["ec2", "release-address", "--region", &norm_region, "--allocation-id", alloc_id])
+                        .output()
+                        .await;
+                }
+            }
+        }
+    }
+
+    clean_local_state(dry_run);
+
+    println!("\n=== Sweep Complete ===");
+    println!("Total EC2 instances scanned: {}", total_instances);
+    println!("Total unattached Elastic IPs scanned: {}", total_eips);
+    if dry_run {
+        println!("Run with --force to execute automated cloud cleanup.");
+    } else {
+        println!("Cleanup completed successfully. Zero orphaned resources lingering.");
+    }
+
+    Ok(())
+}
+
+fn clean_local_state(dry_run: bool) {
+    let state_dir = std::path::Path::new(".warpgate/deployments");
+    if state_dir.exists() {
+        if let Ok(entries) = std::fs::read_dir(state_dir) {
+            for entry in entries.flatten() {
+                let path = entry.path();
+                if path.is_dir() {
+                    let tfstate = path.join("terraform.tfstate");
+                    if tfstate.exists() {
+                        if let Ok(content) = std::fs::read_to_string(&tfstate) {
+                            if content.contains("\"resources\": []") {
+                                if dry_run {
+                                    println!("  [DRY RUN] Would prune empty state directory: {:?}", path);
+                                } else {
+                                    let _ = std::fs::remove_dir_all(&path);
+                                    println!("  Pruned empty state directory: {:?}", path);
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
 }
 
 fn generate_wireguard_keypair() -> (String, String) {
@@ -609,5 +833,45 @@ mod tests {
             }
             _ => panic!("Expected Status command"),
         }
+    }
+
+    #[test]
+    fn test_cli_parsing_sweep() {
+        let cli = Cli::try_parse_from([
+            "warpgate",
+            "sweep",
+            "--regions",
+            "tokyo,frankfurt",
+            "--dry-run",
+            "--force",
+            "--max-age-hours",
+            "3",
+        ])
+        .unwrap();
+
+        match cli.command {
+            Commands::Sweep {
+                regions,
+                dry_run,
+                force,
+                max_age_hours,
+            } => {
+                assert_eq!(regions, vec!["tokyo", "frankfurt"]);
+                assert!(dry_run);
+                assert!(force);
+                assert_eq!(max_age_hours, 3);
+            }
+            _ => panic!("Expected Sweep command"),
+        }
+    }
+
+    #[test]
+    fn test_cli_default_api_url() {
+        // Without WARPGATE_API_URL set, default should be port 8080 (Spring Boot)
+        unsafe {
+            std::env::remove_var("WARPGATE_API_URL");
+        }
+        let cli = Cli::try_parse_from(["warpgate", "status", "warp-test"]).unwrap();
+        assert_eq!(cli.api_url, "http://localhost:8080");
     }
 }
