@@ -512,6 +512,29 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                     teardown.deployment_id, teardown.status
                 );
                 clear_saved_active_deployment_info();
+
+                print!("Waiting for cloud resources to be destroyed...");
+                use std::io::Write;
+                let _ = std::io::stdout().flush();
+                for _ in 0..60 {
+                    tokio::time::sleep(Duration::from_secs(1)).await;
+                    if let Ok(check_res) = client
+                        .get(format!("{}/api/deployments/{}", effective_api_url, target_id))
+                        .send()
+                        .await
+                    {
+                        if let Ok(dep) = check_res.json::<DeploymentResponse>().await {
+                            if dep.status == DeploymentStatus::Destroyed
+                                || dep.status == DeploymentStatus::Failed
+                            {
+                                println!(" Done.");
+                                break;
+                            }
+                        }
+                    }
+                    print!(".");
+                    let _ = std::io::stdout().flush();
+                }
             } else {
                 eprintln!("Teardown request failed: {}", res.status());
             }

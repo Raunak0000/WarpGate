@@ -162,6 +162,16 @@ fn parse_ssh_public_key_from_tfvars(content: &str) -> Option<String> {
     None
 }
 
+fn terraform_command() -> Command {
+    let mut cmd = Command::new("terraform");
+    if let Some(home) = std::env::var_os("HOME") {
+        let cache_dir = PathBuf::from(home).join(".terraform.d/plugin-cache");
+        let _ = std::fs::create_dir_all(&cache_dir);
+        cmd.env("TF_PLUGIN_CACHE_DIR", cache_dir);
+    }
+    cmd
+}
+
 pub async fn run_apply(deployment_id: &str, region: &str, admin_cidr: &str) -> Result<(), String> {
     let tf_dir = get_deployment_terraform_dir(deployment_id)?;
     let ssh_public_key = resolve_ssh_public_key()?;
@@ -171,7 +181,7 @@ pub async fn run_apply(deployment_id: &str, region: &str, admin_cidr: &str) -> R
         deployment_id, tf_dir
     );
 
-    let status = Command::new("terraform")
+    let status = terraform_command()
         .arg("init")
         .arg("-input=false")
         .current_dir(&tf_dir)
@@ -185,7 +195,7 @@ pub async fn run_apply(deployment_id: &str, region: &str, admin_cidr: &str) -> R
         return Err(format!("Terraform init failed: {}", status));
     }
 
-    let status = Command::new("terraform")
+    let status = terraform_command()
         .arg("apply")
         .arg("-auto-approve")
         .arg("-input=false")
@@ -213,7 +223,7 @@ pub async fn run_apply(deployment_id: &str, region: &str, admin_cidr: &str) -> R
 pub async fn get_outputs(deployment_id: &str) -> Result<TerraformOutputs, String> {
     let tf_dir = get_deployment_terraform_dir(deployment_id)?;
 
-    let output = Command::new("terraform")
+    let output = terraform_command()
         .arg("output")
         .arg("-json")
         .current_dir(&tf_dir)
@@ -245,7 +255,7 @@ pub async fn run_destroy(
         deployment_id, tf_dir
     );
 
-    let status = Command::new("terraform")
+    let status = terraform_command()
         .arg("destroy")
         .arg("-auto-approve")
         .arg("-input=false")

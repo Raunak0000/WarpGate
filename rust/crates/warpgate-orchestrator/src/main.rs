@@ -162,29 +162,43 @@ async fn create_deployment(
     };
 
     // 4. Account Quota Circuit Breaker: Max 1 concurrent active instance
-    match state.count_active_deployments(Some(&deployment_id)) {
-        Ok(count) if count >= 1 => {
-            let response = DeploymentResponse {
-                deployment_id,
-                status: DeploymentStatus::Failed,
-                server_ip: None,
-                wireguard_port: None,
-                server_public_key: None,
-                client_ip: None,
-                dns_server: None,
-                error_message: Some(
-                    "Account quota exceeded: Maximum 1 concurrent active deployment allowed to ensure zero unexpected AWS Free Tier billing".to_string(),
-                ),
-                region: payload.region,
-                admin_cidr,
-            };
+    let mut active_deployments = state.list_active_deployments().unwrap_or_default();
+    active_deployments.retain(|d| d.deployment_id != deployment_id);
 
-            return (StatusCode::CONFLICT, Json(response));
+    // If an existing deployment is actively terminating (e.g. teardown or rollback in progress),
+    // wait briefly (up to 30s) for it to complete destruction before rejecting with 409 Conflict.
+    if !active_deployments.is_empty()
+        && active_deployments
+            .iter()
+            .all(|d| d.status == DeploymentStatus::Terminating)
+    {
+        for _ in 0..60 {
+            tokio::time::sleep(Duration::from_millis(500)).await;
+            active_deployments = state.list_active_deployments().unwrap_or_default();
+            active_deployments.retain(|d| d.deployment_id != deployment_id);
+            if active_deployments.is_empty() {
+                break;
+            }
         }
-        Err(e) => {
-            error!("Database error checking active deployments: {}", e);
-        }
-        _ => {}
+    }
+
+    if !active_deployments.is_empty() {
+        let response = DeploymentResponse {
+            deployment_id,
+            status: DeploymentStatus::Failed,
+            server_ip: None,
+            wireguard_port: None,
+            server_public_key: None,
+            client_ip: None,
+            dns_server: None,
+            error_message: Some(
+                "Account quota exceeded: Maximum 1 concurrent active deployment allowed to ensure zero unexpected AWS Free Tier billing".to_string(),
+            ),
+            region: payload.region,
+            admin_cidr,
+        };
+
+        return (StatusCode::CONFLICT, Json(response));
     }
 
     let dns =
