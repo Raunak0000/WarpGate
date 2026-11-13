@@ -36,9 +36,9 @@ enum Commands {
         #[arg(short, long, default_value = "30m")]
         ttl: String,
 
-        /// Allowed admin CIDR for SSH access
-        #[arg(long, required = true)]
-        admin_cidr: String,
+        /// Allowed admin CIDR for SSH access (automatically detected from public IP if omitted)
+        #[arg(long)]
+        admin_cidr: Option<String>,
 
         /// Save client WireGuard configuration file to this path
         #[arg(short, long)]
@@ -127,6 +127,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 );
                 std::process::exit(1);
             }
+            let resolved_admin_cidr = resolve_admin_cidr(&client, admin_cidr).await;
             let deployment_id = format!("warp-{}", &uuid_short());
 
             // 1. Generate client WireGuard keypair locally
@@ -142,7 +143,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 region: normalized_region.clone(),
                 ttl_minutes,
                 client_public_key: client_pub,
-                admin_cidr: Some(admin_cidr),
+                admin_cidr: Some(resolved_admin_cidr),
             };
 
             let res = client
@@ -824,6 +825,42 @@ fn generate_wireguard_keypair() -> (String, String) {
     (priv_b64, pub_b64)
 }
 
+async fn resolve_admin_cidr(client: &reqwest::Client, specified: Option<String>) -> String {
+    if let Some(cidr) = specified {
+        return cidr;
+    }
+
+    if let Ok(env_cidr) = std::env::var("WARPGATE_ADMIN_CIDR") {
+        if !env_cidr.trim().is_empty() {
+            return env_cidr;
+        }
+    }
+
+    // Auto-detect public IP via external discovery APIs
+    println!("Auto-detecting your public IP for secure SSH access...");
+    let endpoints = [
+        "https://api.ipify.org",
+        "https://checkip.amazonaws.com",
+        "https://icanhazip.com",
+    ];
+
+    for ep in endpoints {
+        if let Ok(res) = client.get(ep).timeout(Duration::from_secs(3)).send().await {
+            if let Ok(text) = res.text().await {
+                let ip = text.trim();
+                if ip.parse::<std::net::IpAddr>().is_ok() {
+                    let cidr = format!("{}/32", ip);
+                    println!("[+] Detected admin IP: {} (locking SSH access to this address)", cidr);
+                    return cidr;
+                }
+            }
+        }
+    }
+
+    println!("[WARN] Could not auto-detect public IP. Falling back to 0.0.0.0/0");
+    "0.0.0.0/0".to_string()
+}
+
 fn parse_ttl_minutes(s: &str) -> Result<u32, String> {
     let s = s.trim().to_lowercase();
     if let Some(h) = s.strip_suffix('h') {
@@ -1056,8 +1093,7 @@ mod tests {
 
     #[test]
     fn test_cli_parsing_up_defaults() {
-        let cli =
-            Cli::try_parse_from(["warpgate", "up", "--admin-cidr", "192.168.1.10/32"]).unwrap();
+        let cli = Cli::try_parse_from(["warpgate", "up"]).unwrap();
 
         match cli.command {
             Commands::Up {
@@ -1071,7 +1107,7 @@ mod tests {
             } => {
                 assert_eq!(region, "us-east-1");
                 assert_eq!(ttl, "30m");
-                assert_eq!(admin_cidr, "192.168.1.10/32");
+                assert!(admin_cidr.is_none());
                 assert!(output.is_none());
                 assert!(connect);
                 assert!(!no_connect);
@@ -1106,7 +1142,7 @@ mod tests {
             } => {
                 assert_eq!(region, "eu-central-1");
                 assert_eq!(ttl, "15m");
-                assert_eq!(admin_cidr, "10.0.0.5/32");
+                assert_eq!(admin_cidr, Some("10.0.0.5/32".to_string()));
                 assert!(connect);
                 assert!(no_connect);
             }
@@ -1187,14 +1223,7 @@ mod tests {
 
     #[test]
     fn test_cli_parsing_up_detach() {
-        let cli = Cli::try_parse_from([
-            "warpgate",
-            "up",
-            "--admin-cidr",
-            "1.2.3.4/32",
-            "--detach",
-        ])
-        .unwrap();
+        let cli = Cli::try_parse_from(["warpgate", "up", "--detach"]).unwrap();
 
         match cli.command {
             Commands::Up { detach, .. } => {

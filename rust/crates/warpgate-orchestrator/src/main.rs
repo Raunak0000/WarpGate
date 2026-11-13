@@ -70,8 +70,10 @@ async fn list_deployments(
 }
 
 async fn notify_webhook(deployment_id: &str, status: &DeploymentStatus, error_message: Option<&str>) {
-    let base_url = std::env::var("WARPGATE_CONTROL_PLANE_URL")
-        .unwrap_or_else(|_| "http://localhost:8080".to_string());
+    let base_url = match std::env::var("WARPGATE_CONTROL_PLANE_URL") {
+        Ok(url) if !url.trim().is_empty() => url,
+        _ => return,
+    };
     let url = format!("{}/api/deployments/{}/webhook", base_url.trim_end_matches('/'), deployment_id);
     let payload = serde_json::json!({
         "status": status,
@@ -81,7 +83,7 @@ async fn notify_webhook(deployment_id: &str, status: &DeploymentStatus, error_me
     let client = reqwest::Client::new();
     let res = client
         .post(&url)
-        .timeout(Duration::from_millis(1500))
+        .timeout(Duration::from_millis(500))
         .json(&payload)
         .send()
         .await;
