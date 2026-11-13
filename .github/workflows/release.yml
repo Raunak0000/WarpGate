@@ -112,3 +112,4 @@ jobs:
             release-artifacts/*.zip
             release-artifacts/SHA256SUMS.txt
           generate_release_notes: true
+

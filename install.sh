@@ -127,3 +127,4 @@ echo -e "${BLUE}Running initial WarpGate diagnostics...${NC}\n"
 "${INSTALL_DIR}/warpgate" doctor || true
 
 echo -e "${GREEN}${BOLD}Installation complete! Type 'warpgate' anytime to get started.${NC}"
+
