@@ -1,131 +1,91 @@
 # WarpGate
 
-**Ephemeral Multi-Region Cloud VPN Orchestrator**
+Ephemeral multi-region WireGuard VPN on AWS.
 
-WarpGate provisions disposable, self-destructing WireGuard VPN gateways on AWS with automated network tuning (Linux TCP BBR), tracker/ad blocking (AdGuard Home), and automated Time-to-Live (TTL) teardown.
-
----
-
-## ✨ Features
-
-- **⚡ Ephemeral & Self-Destructing**: Automated TTL lifecycle engine terminates AWS infrastructure after expiration—never leave orphaned cloud resources running.
-- **🌍 Multi-Region Support**: Deploy to global AWS regions using canonical IDs (`us-east-1`, `eu-central-1`) or friendly aliases (`tokyo`, `frankfurt`, `london`).
-- **🔒 Zero-Trust Key Generation**: Curve25519 (X25519) WireGuard keypairs are generated client-side—private keys never leave your machine.
-- **📱 Instant Mobile & Laptop Connection**: Renders an in-terminal 2D QR code for instant mobile app scanning, and automatically configures Linux laptops via NetworkManager (`nmcli`) or `wg-quick`.
-- **🚀 High-Throughput Kernel Tuning**: Linux TCP BBR congestion control maintains high speeds even under packet loss (up to 4.3x throughput over standard Cubic).
-- **🛡️ Built-in Ad & Telemetry Blocking**: Embedded AdGuard Home DNS sinkhole resolves queries locally and filters trackers at the gateway.
+WarpGate provisions on-demand WireGuard VPN gateways on AWS with Linux TCP BBR congestion control, AdGuard Home DNS sinkholing, and automated time-to-live (TTL) teardown.
 
 ---
 
-## 🏗️ Architecture
+## Features
 
-```
-                       USER
-                        │
-                        ▼
-               ┌─────────────────┐
-               │    Rust CLI     │  (Generates Curve25519 keys, renders QR, connects host)
-               └────────┬────────┘
-                        │
-                        ▼
-               ┌─────────────────┐
-               │   Rust Engine   │  (Axum + Tokio async orchestration & TTL timers)
-               └────────┬────────┘
-                        │
-           ┌────────────┴────────────┐
-           ▼                         ▼
-    ┌─────────────┐           ┌─────────────┐
-    │  Terraform  │           │   Ansible   │
-    │ (AWS Infra) │           │ (WireGuard) │
-    └──────┬──────┘           └──────┬──────┘
-           │                         │
-           └────────────┬────────────┘
-                        ▼
-               ┌─────────────────┐
-               │   AWS EC2 Node  │  (WireGuard + TCP BBR + AdGuard DNS Sinkhole)
-               └────────┬────────┘
-                        │
-                        ▼
-                     INTERNET
-```
+- **Automated teardown**: Gateways automatically destroy themselves after a configurable TTL (for example, 30m or 1h) to prevent unwanted cloud costs.
+- **Multi-region**: Deploy to AWS regions using region codes (`us-east-1`, `eu-central-1`) or short aliases (`tokyo`, `frankfurt`, `london`).
+- **Client-side keys**: Curve25519 WireGuard keypairs are generated locally on your machine. Private keys never leave your device.
+- **Client connection**: Generates a terminal QR code for the WireGuard mobile app, or connects your Linux machine directly via NetworkManager or `wg-quick`.
+- **TCP BBR**: Enables Linux TCP BBR congestion control on the gateway for improved throughput under packet loss.
+- **Ad and tracker blocking**: Runs an embedded AdGuard Home instance on the gateway to filter ads and trackers locally.
 
 ---
 
-## 📋 Prerequisites
+## Prerequisites
 
-Before deploying live cloud gateways, ensure you have:
-
-- **[Rust & Cargo](https://rustup.rs/)** (1.75+)
+- **[Rust](https://rustup.rs/)** (1.75+)
 - **[Terraform](https://developer.hashicorp.com/terraform/install)** (1.5+)
 - **[Ansible](https://docs.ansible.com/ansible/latest/installation_guide/intro_installation.html)**
-- **AWS Credentials** configured (`aws configure` or `AWS_ACCESS_KEY_ID` / `AWS_SECRET_ACCESS_KEY`)
-- **SSH Key** at `~/.ssh/warpgate_key` (or set `WARPGATE_SSH_PUBLIC_KEY`)
+- **AWS credentials** configured (`aws configure` or `AWS_ACCESS_KEY_ID` / `AWS_SECRET_ACCESS_KEY`)
+- **SSH key** at `~/.ssh/warpgate_key` (or set `WARPGATE_SSH_PUBLIC_KEY`)
 
-> **Tip**: Want to explore WarpGate without AWS credentials or cloud spend? Use the **[Dry-Run Mode](#-dry-run-mode-no-aws-required)**!
+To test without AWS credentials, see [Dry-Run Mode](#dry-run-mode).
 
 ---
 
-## 🚀 Installation & Quick Start
+## Installation
 
-### 1. One-Line Universal Install
-
-Install the standalone `warpgate` binary instantly (Linux / macOS):
+### Shell installer (Linux and macOS)
 
 ```bash
 curl -fsSL https://raw.githubusercontent.com/Raunak0000/WarpGate/main/install.sh | bash
 ```
 
-Or install from source with Cargo:
+### From source
+
 ```bash
 cargo install --path rust/crates/warpgate-cli
 ```
 
-### 2. Verify Your Environment
+---
 
-Run `warpgate` with no arguments to run the system readiness check and view the quick-start guide:
+## Quick Start
+
+### 1. Check your environment
+
+Run `warpgate` with no arguments to run the system check:
 
 ```bash
 warpgate
 ```
 
 ```text
-============================================================
-         WarpGate - Ephemeral Zero-Cost Cloud VPN           
-============================================================
+WarpGate - Ephemeral Cloud VPN
 
-System & Environment Readiness Diagnostics:
-
-  [✓] Platform:            linux (x86_64)
-  [✓] VPN Connection Mgr:  NetworkManager (nmcli)
-  [✓] AWS Cloud Identity:  Active credentials detected via AWS CLI
-  [✓] Infrastructure:      Terraform v1.15.9
-  [✓] Config Engine:       Ansible playbook detected
-  [✓] WarpGate Daemon:     Idle (will auto-spawn on 'warpgate up')
+System and environment diagnostics:
+  [OK] Platform:            linux (x86_64)
+  [OK] VPN Connection Mgr:  NetworkManager (nmcli)
+  [OK] AWS Cloud Identity:  Active credentials detected via AWS CLI
+  [OK] Infrastructure:      Terraform v1.15.9
+  [OK] Config Engine:       Ansible playbook detected
+  [OK] WarpGate Daemon:     Idle (auto-spawns on 'warpgate up')
 ```
 
-### 3. Spin Up an Ephemeral VPN Gateway
+### 2. Start a VPN gateway
 
 ```bash
-# Provision a gateway in Tokyo with a 30-minute TTL (auto-detects public IP & auto-connects)
+# Deploy a gateway in Tokyo with a 30-minute TTL
 warpgate up --region tokyo --ttl 30m
 ```
 
-Once provisioning completes:
-1. The terminal displays a **QR code**—scan it with the [WireGuard mobile app](https://www.wireguard.com/install/) to connect your phone.
-2. On Linux laptops, your network connects automatically via NetworkManager (`nmcli`) or `wg-quick`.
-3. The background orchestrator daemon is automatically spawned and managed for you.
+When ready:
+1. Scan the terminal QR code with the WireGuard mobile app to connect a phone.
+2. On Linux, your connection is configured automatically.
+3. The background daemon handles teardown when the TTL expires.
 
-### 4. Check Connection Status
-
-View the live terminal status dashboard at any time (no deployment ID needed):
+### 3. Check status
 
 ```bash
 warpgate status
 ```
 
-### 5. Teardown on Demand
-
-When finished, tear down the infrastructure and disconnect with one command (or simply let the TTL auto-destruct it):
+### 4. Tear down
 
 ```bash
 warpgate down
@@ -133,61 +93,59 @@ warpgate down
 
 ---
 
-## 🧪 Dry-Run Mode (No AWS Required)
+## Dry-Run Mode
 
-To test WarpGate's CLI workflow and simulated lifecycle without an AWS account:
+You can test the CLI without an AWS account or cloud infrastructure:
 
 ```bash
-# Spin up in simulated dry-run mode (detached background session)
+# Run in dry-run mode
 WARPGATE_DRY_RUN=1 warpgate up --region tokyo --ttl 5m --no-connect --detach
 
 # Check status
 warpgate status
 
-# Clean teardown
+# Tear down
 WARPGATE_DRY_RUN=1 warpgate down
 ```
 
 ---
 
-## 💻 CLI Reference
+## CLI Reference
 
 ```
 Usage: warpgate [OPTIONS] [COMMAND]
 
 Commands:
   up           Provision a new ephemeral WireGuard VPN node
-  status       Check status of an active deployment (or active node if omitted)
-  down         Terminate and destroy a deployment immediately (auto-detects active node)
-  sweep        Scan for and sweep orphaned cloud infrastructure and lingering Elastic IPs
+  status       Check status of an active deployment
+  down         Terminate and destroy an active deployment
+  sweep        Scan for and clean up orphaned cloud resources
   doctor       Run system diagnostics and verify environment readiness
-  completions  Generate shell autocompletion scripts (bash, zsh, fish, powershell)
+  completions  Generate shell autocompletions (bash, zsh, fish, powershell)
 ```
 
-### `warpgate up` Options
+### `warpgate up` flags
 
 | Flag | Description | Default |
 | :--- | :--- | :--- |
-| `-r, --region <REGION>` | Target AWS region or alias (`tokyo`, `frankfurt`, `us-east-1`, etc.) | `us-east-1` |
+| `-r, --region <REGION>` | Target AWS region or alias (`tokyo`, `frankfurt`, `us-east-1`) | `us-east-1` |
 | `-t, --ttl <DURATION>` | Time-to-Live before automated teardown (`15m`, `30m`, `1h`) | `30m` |
-| `--admin-cidr <CIDR>` | Allowed IPv4 CIDR for administrative SSH access | *Auto-detected* |
-| `-d, --detach` | Run in detached background mode (non-blocking) | `false` |
-| `-o, --output <PATH>` | Save generated client `wg0.conf` configuration to a specific file | Optional |
-| `--no-connect` | Skip automatically connecting local laptop to the VPN tunnel | `false` |
+| `--admin-cidr <CIDR>` | Allowed IPv4 CIDR for SSH access | Auto-detected |
+| `-d, --detach` | Run in background mode without blocking | `false` |
+| `-o, --output <PATH>` | Save generated client `wg0.conf` to a file | Optional |
+| `--no-connect` | Skip connecting the local machine to the VPN | `false` |
 
 ---
 
-## 📚 Documentation
+## Documentation
 
-For architecture details, benchmarks, and design decisions:
-
-- **[Architecture Deep Dive](docs/ARCHITECTURE.md)**: Layered system design, Axum API contracts, and security controls.
-- **[Performance Benchmark Report](docs/BENCHMARK_REPORT.md)**: TCP BBR vs. CUBIC throughput analysis, packet loss tests, and DNS latency.
-- **[Demo Walkthrough](docs/DEMO_WALKTHROUGH.md)**: Complete step-by-step lifecycle walkthrough and terminal QR verification.
-- **[Project Roadmap](docs/ROADMAP.md)**: Six-week timeline and implementation milestones.
+- [Architecture](docs/ARCHITECTURE.md): System design, layered components, and API spec.
+- [Benchmark Report](docs/BENCHMARK_REPORT.md): TCP BBR vs CUBIC throughput tests and DNS latency.
+- [Walkthrough](docs/DEMO_WALKTHROUGH.md): Step-by-step lifecycle walkthrough and verification.
+- [Roadmap](docs/ROADMAP.md): Project timeline and milestones.
 
 ---
 
-## 📄 License
+## License
 
 This project is licensed under the [GNU General Public License v3.0](LICENSE).
