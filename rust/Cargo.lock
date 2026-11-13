@@ -1963,6 +1963,7 @@ dependencies = [
  "qrcode",
  "rand",
  "reqwest",
+ "serde_json",
  "tokio",
  "warpgate-common",
  "x25519-dalek",

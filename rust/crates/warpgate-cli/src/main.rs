@@ -57,20 +57,20 @@ enum Commands {
         detach: bool,
     },
 
-    /// Check status of an active deployment
+    /// Check status of an active deployment (or currently active node if omitted)
     Status {
-        /// Deployment ID
-        id: String,
+        /// Deployment ID (automatically detected if omitted)
+        id: Option<String>,
     },
 
-    /// Terminate and destroy a deployment immediately
+    /// Terminate and destroy a deployment immediately (or currently active node if omitted)
     Down {
-        /// Deployment ID
-        id: String,
+        /// Deployment ID (automatically detected if omitted)
+        id: Option<String>,
 
-        /// AWS region where node was deployed (or alias like 'tokyo')
-        #[arg(short, long, default_value = "us-east-1")]
-        region: String,
+        /// AWS region where node was deployed (auto-detected if omitted)
+        #[arg(short, long)]
+        region: Option<String>,
 
         /// Disconnect local host VPN connection if active
         #[arg(long, default_value_t = true)]
@@ -246,6 +246,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                                 }
                             }
 
+                            save_active_deployment_info(&deployment_id, &normalized_region);
                             break;
                         }
                         DeploymentStatus::Failed => {
@@ -253,6 +254,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                                 "\nDeployment failed: {}",
                                 dep.error_message.as_deref().unwrap_or("Unknown error")
                             );
+                            clear_saved_active_deployment_info();
                             if let Some(pid) = spawned_pid {
                                 stop_daemon(Some(pid));
                             }
@@ -270,7 +272,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 println!("      Deployment ID: {}", deployment_id);
                 println!("      Region:        {}", normalized_region);
                 println!("      TTL:           {}m", ttl_minutes);
-                println!("      To disconnect & teardown: warpgate down {}", deployment_id);
+                println!("      To disconnect & teardown: warpgate down");
                 println!("============================================================");
                 return Ok(());
             }
@@ -302,6 +304,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                             .json(&req_body)
                             .send()
                             .await;
+
+                        clear_saved_active_deployment_info();
 
                         // Wait briefly for teardown to finish
                         for _ in 0..15 {
@@ -339,6 +343,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                                         println!("  [-] Disconnecting local VPN...");
                                         disconnect_local_vpn("warpgate");
                                     }
+                                    clear_saved_active_deployment_info();
                                     if let Some(pid) = spawned_pid {
                                         stop_daemon(Some(pid));
                                     }
@@ -349,6 +354,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                                     if should_connect {
                                         disconnect_local_vpn("warpgate");
                                     }
+                                    clear_saved_active_deployment_info();
                                     if let Some(pid) = spawned_pid {
                                         stop_daemon(Some(pid));
                                     }
@@ -365,13 +371,46 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             let (effective_api_url, _) =
                 ensure_backend_available(&client, &cli.api_url, false).await?;
 
+            let target_id = match id {
+                Some(i) => i,
+                None => {
+                    if let Some((saved_id, _)) = get_saved_active_deployment_info() {
+                        saved_id
+                    } else if let Ok(res) = client
+                        .get(format!("{}/api/deployments", effective_api_url))
+                        .send()
+                        .await
+                    {
+                        if let Ok(deps) = res.json::<Vec<DeploymentResponse>>().await {
+                            if let Some(active) = deps.iter().find(|d| {
+                                d.status != DeploymentStatus::Destroyed
+                                    && d.status != DeploymentStatus::Failed
+                            }) {
+                                active.deployment_id.clone()
+                            } else if let Some(last) = deps.last() {
+                                last.deployment_id.clone()
+                            } else {
+                                println!("No active deployments found.");
+                                return Ok(());
+                            }
+                        } else {
+                            println!("No active deployments found.");
+                            return Ok(());
+                        }
+                    } else {
+                        println!("No active deployments found.");
+                        return Ok(());
+                    }
+                }
+            };
+
             let res = client
-                .get(format!("{}/api/deployments/{}", effective_api_url, id))
+                .get(format!("{}/api/deployments/{}", effective_api_url, target_id))
                 .send()
                 .await?;
 
             if res.status().as_u16() == 404 {
-                println!("Deployment '{}' not found.", id);
+                println!("Deployment '{}' not found.", target_id);
                 return Ok(());
             }
 
@@ -387,25 +426,81 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             let (effective_api_url, _) =
                 ensure_backend_available(&client, &cli.api_url, false).await?;
 
-            let normalized_region = warpgate_common::normalize_region(&region)
-                .map_err(|e| format!("Invalid region '{}': {}", region, e))?
-                .to_string();
-
             if disconnect {
                 disconnect_local_vpn("warpgate");
             }
 
+            let (target_id, target_region) = match (id, region) {
+                (Some(i), Some(r)) => {
+                    let norm = warpgate_common::normalize_region(&r)
+                        .map_err(|e| format!("Invalid region '{}': {}", r, e))?
+                        .to_string();
+                    (i, norm)
+                }
+                (Some(i), None) => {
+                    let r = if let Ok(res) = client
+                        .get(format!("{}/api/deployments/{}", effective_api_url, i))
+                        .send()
+                        .await
+                    {
+                        if let Ok(dep) = res.json::<DeploymentResponse>().await {
+                            dep.region
+                        } else if let Some((saved_id, saved_r)) = get_saved_active_deployment_info() {
+                            if saved_id == i {
+                                saved_r
+                            } else {
+                                "us-east-1".to_string()
+                            }
+                        } else {
+                            "us-east-1".to_string()
+                        }
+                    } else {
+                        "us-east-1".to_string()
+                    };
+                    (i, r)
+                }
+                (None, _) => {
+                    let mut found = None;
+                    if let Ok(res) = client
+                        .get(format!("{}/api/deployments", effective_api_url))
+                        .send()
+                        .await
+                    {
+                        if let Ok(deps) = res.json::<Vec<DeploymentResponse>>().await {
+                            if let Some(active) = deps.iter().find(|d| {
+                                d.status != DeploymentStatus::Destroyed
+                                    && d.status != DeploymentStatus::Failed
+                            }) {
+                                found = Some((active.deployment_id.clone(), active.region.clone()));
+                            }
+                        }
+                    }
+                    if found.is_none() {
+                        found = get_saved_active_deployment_info();
+                    }
+
+                    match found {
+                        Some((f_id, f_region)) => (f_id, f_region),
+                        None => {
+                            println!("No active WarpGate deployment found to terminate.");
+                            check_and_stop_daemon_if_idle(&client, &effective_api_url).await;
+                            return Ok(());
+                        }
+                    }
+                }
+            };
+
             println!(
                 "Terminating deployment '{}' in region '{}'...",
-                id, normalized_region
+                target_id, target_region
             );
             let req_body = TeardownRequest {
-                deployment_id: id.clone(),
-                region: normalized_region,
+                deployment_id: target_id.clone(),
+                region: target_region,
             };
 
             let res = client
-                .post(format!("{}/api/deployments/{}/teardown", effective_api_url, id))
+                .post(format!("{}/api/deployments/{}/teardown", effective_api_url, target_id))
                 .json(&req_body)
                 .send()
                 .await?;
@@ -416,6 +511,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                     "Teardown initiated for '{}' (Status: {:?})",
                     teardown.deployment_id, teardown.status
                 );
+                clear_saved_active_deployment_info();
             } else {
                 eprintln!("Teardown request failed: {}", res.status());
             }
@@ -861,6 +957,34 @@ async fn resolve_admin_cidr(client: &reqwest::Client, specified: Option<String>)
     "0.0.0.0/0".to_string()
 }
 
+fn save_active_deployment_info(deployment_id: &str, region: &str) {
+    let state_dir = PathBuf::from(".warpgate");
+    let _ = std::fs::create_dir_all(&state_dir);
+    let active_file = state_dir.join("active.json");
+    let content = serde_json::json!({
+        "deployment_id": deployment_id,
+        "region": region,
+    });
+    let _ = std::fs::write(active_file, content.to_string());
+}
+
+fn get_saved_active_deployment_info() -> Option<(String, String)> {
+    let active_file = PathBuf::from(".warpgate/active.json");
+    if let Ok(content) = std::fs::read_to_string(active_file) {
+        if let Ok(val) = serde_json::from_str::<serde_json::Value>(&content) {
+            let id = val.get("deployment_id").and_then(|v| v.as_str())?.to_string();
+            let region = val.get("region").and_then(|v| v.as_str())?.to_string();
+            return Some((id, region));
+        }
+    }
+    None
+}
+
+fn clear_saved_active_deployment_info() {
+    let active_file = PathBuf::from(".warpgate/active.json");
+    let _ = std::fs::remove_file(active_file);
+}
+
 fn parse_ttl_minutes(s: &str) -> Result<u32, String> {
     let s = s.trim().to_lowercase();
     if let Some(h) = s.strip_suffix('h') {
@@ -1161,8 +1285,23 @@ mod tests {
                 region,
                 disconnect,
             } => {
-                assert_eq!(id, "warp-998877");
-                assert_eq!(region, "us-west-2");
+                assert_eq!(id, Some("warp-998877".to_string()));
+                assert_eq!(region, Some("us-west-2".to_string()));
+                assert!(disconnect);
+            }
+            _ => panic!("Expected Down command"),
+        }
+
+        // Test down with no arguments
+        let cli_no_args = Cli::try_parse_from(["warpgate", "down"]).unwrap();
+        match cli_no_args.command {
+            Commands::Down {
+                id,
+                region,
+                disconnect,
+            } => {
+                assert!(id.is_none());
+                assert!(region.is_none());
                 assert!(disconnect);
             }
             _ => panic!("Expected Down command"),
@@ -1175,7 +1314,16 @@ mod tests {
 
         match cli.command {
             Commands::Status { id } => {
-                assert_eq!(id, "warp-112233");
+                assert_eq!(id, Some("warp-112233".to_string()));
+            }
+            _ => panic!("Expected Status command"),
+        }
+
+        // Test status with no arguments
+        let cli_no_args = Cli::try_parse_from(["warpgate", "status"]).unwrap();
+        match cli_no_args.command {
+            Commands::Status { id } => {
+                assert!(id.is_none());
             }
             _ => panic!("Expected Status command"),
         }
