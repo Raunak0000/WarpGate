@@ -35,6 +35,24 @@ resource "aws_internet_gateway" "warpgate_igw" {
   }
 }
 
+# Look up Availability Zones that support t3.micro in this region
+data "aws_availability_zones" "available" {
+  state = "available"
+  filter {
+    name   = "opt-in-status"
+    values = ["opt-in-not-required"]
+  }
+}
+
+data "aws_ec2_instance_type_offerings" "t3_micro" {
+  filter {
+    name   = "instance-type"
+    values = ["t3.micro"]
+  }
+
+  location_type = "availability-zone"
+}
+
 # Public Subnet
 #
 # Public IP assignment is disabled because the VPN node uses
@@ -42,6 +60,7 @@ resource "aws_internet_gateway" "warpgate_igw" {
 resource "aws_subnet" "warpgate_subnet" {
   vpc_id                  = aws_vpc.warpgate_vpc.id
   cidr_block              = var.subnet_cidr
+  availability_zone       = length(data.aws_ec2_instance_type_offerings.t3_micro.locations) > 0 ? sort(data.aws_ec2_instance_type_offerings.t3_micro.locations)[0] : data.aws_availability_zones.available.names[0]
   map_public_ip_on_launch = false
 
   tags = {
@@ -220,76 +239,13 @@ resource "aws_eip" "warpgate_eip" {
   }
 }
 
-# KMS Key for CloudWatch Logs
-#
-# VPC Flow Logs may contain network metadata, so the CloudWatch
-# log group is encrypted using a customer-managed KMS key.
-resource "aws_kms_key" "warpgate_logs" {
-  description         = "KMS key for WarpGate VPC flow logs"
-  enable_key_rotation = true
-
-  tags = {
-    Name = "${local.name_prefix}-logs-kms"
-  }
-}
-
-# Explicit KMS key policy
-#
-# The account root retains administrative control of the key,
-# while CloudWatch Logs is allowed to use the key for encryption.
-data "aws_caller_identity" "current" {}
-
-resource "aws_kms_key_policy" "warpgate_logs" {
-  key_id = aws_kms_key.warpgate_logs.id
-
-  policy = jsonencode({
-    Version = "2012-10-17"
-
-    Statement = [
-      {
-        Sid    = "EnableAccountRootPermissions"
-        Effect = "Allow"
-
-        Principal = {
-          AWS = "arn:aws:iam::${data.aws_caller_identity.current.account_id}:root"
-        }
-
-        Action   = "kms:*"
-        Resource = "*"
-      },
-      {
-        Sid    = "AllowCloudWatchLogsUseOfKey"
-        Effect = "Allow"
-
-        Principal = {
-          Service = "logs.amazonaws.com"
-        }
-
-        Action = [
-          "kms:Encrypt",
-          "kms:Decrypt",
-          "kms:ReEncrypt*",
-          "kms:GenerateDataKey*",
-          "kms:DescribeKey"
-        ]
-
-        Resource = "*"
-      }
-    ]
-  })
-}
-
-# KMS Alias
-resource "aws_kms_alias" "warpgate_logs" {
-  name          = "alias/${local.name_prefix}-logs"
-  target_key_id = aws_kms_key.warpgate_logs.key_id
-}
-
 # CloudWatch Log Group for VPC Flow Logs
+#
+# CloudWatch Logs natively provides encryption-at-rest using AWS-managed keys
+# at zero additional cost, avoiding customer-managed KMS key charges ($1.00/month).
 resource "aws_cloudwatch_log_group" "warpgate_vpc_flow_logs" {
   name              = "/aws/vpc/${local.name_prefix}"
   retention_in_days = 365
-  kms_key_id        = aws_kms_key.warpgate_logs.arn
 
   tags = {
     Name = "${local.name_prefix}-flow-logs"
