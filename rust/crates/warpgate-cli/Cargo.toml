@@ -12,3 +12,7 @@ rand = "0.10.3"
 reqwest = { version = "0.13.5", features = ["json"] }
 tokio = { version = "1.53.1", features = ["full"] }
 x25519-dalek = { version = "3.0.0", features = ["static_secrets"] }
+
+[[bin]]
+name = "warpgate"
+path = "src/main.rs"

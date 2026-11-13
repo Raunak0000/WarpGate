@@ -302,6 +302,50 @@ impl DbStore {
 
         Ok(result)
     }
+
+    pub fn list_all_deployments(&self) -> Result<Vec<DeploymentResponse>, String> {
+        let conn = self.conn.lock().map_err(|e| e.to_string())?;
+        let mut stmt = conn
+            .prepare(
+                "SELECT deployment_id, status, server_ip, wireguard_port, server_public_key,
+                        client_ip, dns_server, error_message, region, admin_cidr
+                 FROM deployments",
+            )
+            .map_err(|e| e.to_string())?;
+
+        let rows = stmt
+            .query_map([], |row| {
+                let status_str: String = row.get(1)?;
+                let status = str_to_status(&status_str).map_err(|e| {
+                    rusqlite::Error::FromSqlConversionFailure(
+                        1,
+                        rusqlite::types::Type::Text,
+                        Box::new(std::io::Error::new(std::io::ErrorKind::InvalidData, e)),
+                    )
+                })?;
+
+                Ok(DeploymentResponse {
+                    deployment_id: row.get(0)?,
+                    status,
+                    server_ip: row.get(2)?,
+                    wireguard_port: row.get(3)?,
+                    server_public_key: row.get(4)?,
+                    client_ip: row.get(5)?,
+                    dns_server: row.get(6)?,
+                    error_message: row.get(7)?,
+                    region: row.get(8)?,
+                    admin_cidr: row.get(9)?,
+                })
+            })
+            .map_err(|e| e.to_string())?;
+
+        let mut result = Vec::new();
+        for r in rows {
+            result.push(r.map_err(|e| e.to_string())?);
+        }
+
+        Ok(result)
+    }
 }
 
 #[cfg(test)]

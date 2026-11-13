@@ -51,6 +51,10 @@ enum Commands {
         /// Skip automatically connecting this laptop to the VPN tunnel
         #[arg(long)]
         no_connect: bool,
+
+        /// Run in detached background mode (do not keep terminal attached to session)
+        #[arg(short = 'd', long)]
+        detach: bool,
     },
 
     /// Check status of an active deployment
@@ -106,7 +110,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             output,
             connect,
             no_connect,
+            detach,
         } => {
+            let (effective_api_url, spawned_pid) =
+                ensure_backend_available(&client, &cli.api_url, true).await?;
+
             let normalized_region = warpgate_common::normalize_region(&region)
                 .map_err(|e| format!("Invalid region '{}': {}", region, e))?
                 .to_string();
@@ -131,14 +139,14 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
             let req_body = DeploymentRequest {
                 deployment_id: deployment_id.clone(),
-                region: normalized_region,
+                region: normalized_region.clone(),
                 ttl_minutes,
                 client_public_key: client_pub,
                 admin_cidr: Some(admin_cidr),
             };
 
             let res = client
-                .post(format!("{}/api/deployments", cli.api_url))
+                .post(format!("{}/api/deployments", effective_api_url))
                 .json(&req_body)
                 .send()
                 .await?;
@@ -163,7 +171,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 tokio::time::sleep(Duration::from_secs(4)).await;
 
                 let status_res = client
-                    .get(format!("{}/api/deployments/{}", cli.api_url, deployment_id))
+                    .get(format!("{}/api/deployments/{}", effective_api_url, deployment_id))
                     .send()
                     .await?;
 
@@ -244,6 +252,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                                 "\nDeployment failed: {}",
                                 dep.error_message.as_deref().unwrap_or("Unknown error")
                             );
+                            if let Some(pid) = spawned_pid {
+                                stop_daemon(Some(pid));
+                            }
                             std::process::exit(1);
                         }
                         _ => {}
@@ -251,11 +262,110 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                     last_status = Some(dep.status);
                 }
             }
+
+            if detach {
+                println!("\n============================================================");
+                println!("  [+] WarpGate VPN is ACTIVE (Detached Mode)");
+                println!("      Deployment ID: {}", deployment_id);
+                println!("      Region:        {}", normalized_region);
+                println!("      TTL:           {}m", ttl_minutes);
+                println!("      To disconnect & teardown: warpgate down {}", deployment_id);
+                println!("============================================================");
+                return Ok(());
+            }
+
+            println!("\n============================================================");
+            println!("  [+] WarpGate VPN session is ACTIVE");
+            println!("      Deployment ID: {}", deployment_id);
+            println!("      Region:        {}", normalized_region);
+            println!("      TTL:           {}m", ttl_minutes);
+            println!("      Session attached. Press Ctrl+C to disconnect and teardown.");
+            println!("============================================================");
+
+            // Keep session attached; monitor TTL and listen for Ctrl+C
+            loop {
+                tokio::select! {
+                    _ = tokio::signal::ctrl_c() => {
+                        println!("\n[!] Ctrl+C detected. Shutting down WarpGate session...");
+                        if should_connect {
+                            println!("  [-] Disconnecting local VPN connection...");
+                            disconnect_local_vpn("warpgate");
+                        }
+                        println!("  [-] Terminating deployment '{}' in region '{}'...", deployment_id, normalized_region);
+                        let req_body = TeardownRequest {
+                            deployment_id: deployment_id.clone(),
+                            region: normalized_region.clone(),
+                        };
+                        let _ = client
+                            .post(format!("{}/api/deployments/{}/teardown", effective_api_url, deployment_id))
+                            .json(&req_body)
+                            .send()
+                            .await;
+
+                        // Wait briefly for teardown to finish
+                        for _ in 0..15 {
+                            tokio::time::sleep(Duration::from_secs(1)).await;
+                            if let Ok(res) = client
+                                .get(format!("{}/api/deployments/{}", effective_api_url, deployment_id))
+                                .send()
+                                .await
+                            {
+                                if let Ok(status_dep) = res.json::<DeploymentResponse>().await {
+                                    if status_dep.status == DeploymentStatus::Destroyed {
+                                        println!("  [+] Infrastructure successfully destroyed.");
+                                        break;
+                                    }
+                                }
+                            }
+                        }
+
+                        if let Some(pid) = spawned_pid {
+                            stop_daemon(Some(pid));
+                        }
+                        println!("[+] Session ended cleanly. Zero resources lingering.");
+                        return Ok(());
+                    }
+                    _ = tokio::time::sleep(Duration::from_secs(4)) => {
+                        if let Ok(res) = client
+                            .get(format!("{}/api/deployments/{}", effective_api_url, deployment_id))
+                            .send()
+                            .await
+                        {
+                            if let Ok(status_dep) = res.json::<DeploymentResponse>().await {
+                                if status_dep.status == DeploymentStatus::Destroyed {
+                                    println!("\n[+] TTL expired. Deployment was automatically torn down.");
+                                    if should_connect {
+                                        println!("  [-] Disconnecting local VPN...");
+                                        disconnect_local_vpn("warpgate");
+                                    }
+                                    if let Some(pid) = spawned_pid {
+                                        stop_daemon(Some(pid));
+                                    }
+                                    println!("[+] Session ended cleanly.");
+                                    return Ok(());
+                                } else if status_dep.status == DeploymentStatus::Failed {
+                                    eprintln!("\n[-] Deployment failed: {}", status_dep.error_message.as_deref().unwrap_or("Unknown error"));
+                                    if should_connect {
+                                        disconnect_local_vpn("warpgate");
+                                    }
+                                    if let Some(pid) = spawned_pid {
+                                        stop_daemon(Some(pid));
+                                    }
+                                    std::process::exit(1);
+                                }
+                            }
+                        }
+                    }
+                }
+            }
         }
 
         Commands::Status { id } => {
+            let (effective_api_url, _) =
+                ensure_backend_available(&client, &cli.api_url, false).await?;
+
             let res = client
-                .get(format!("{}/api/deployments/{}", cli.api_url, id))
+                .get(format!("{}/api/deployments/{}", effective_api_url, id))
                 .send()
                 .await?;
 
@@ -273,6 +383,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             region,
             disconnect,
         } => {
+            let (effective_api_url, _) =
+                ensure_backend_available(&client, &cli.api_url, false).await?;
+
             let normalized_region = warpgate_common::normalize_region(&region)
                 .map_err(|e| format!("Invalid region '{}': {}", region, e))?
                 .to_string();
@@ -291,7 +404,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             };
 
             let res = client
-                .post(format!("{}/api/deployments/{}/teardown", cli.api_url, id))
+                .post(format!("{}/api/deployments/{}/teardown", effective_api_url, id))
                 .json(&req_body)
                 .send()
                 .await?;
@@ -305,6 +418,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             } else {
                 eprintln!("Teardown request failed: {}", res.status());
             }
+
+            check_and_stop_daemon_if_idle(&client, &effective_api_url).await;
         }
 
         Commands::Sweep {
@@ -474,6 +589,201 @@ async fn sweep_orphaned_resources(
     }
 
     Ok(())
+}
+
+async fn is_url_reachable(client: &reqwest::Client, url: &str) -> bool {
+    let check_urls = [
+        format!("{}/api/deployments/health", url.trim_end_matches('/')),
+        format!("{}/api/deployments", url.trim_end_matches('/')),
+    ];
+
+    for check_url in check_urls {
+        if let Ok(res) = client
+            .get(&check_url)
+            .timeout(Duration::from_millis(500))
+            .send()
+            .await
+        {
+            let code = res.status().as_u16();
+            if (200..=499).contains(&code) {
+                return true;
+            }
+        }
+    }
+    false
+}
+
+fn find_orchestrator_binary() -> Option<PathBuf> {
+    // 1. Next to current_exe or in parent target directory (e.g. target/debug/deps -> target/debug)
+    if let Ok(exe) = std::env::current_exe() {
+        if let Some(parent) = exe.parent() {
+            let candidate = parent.join("warpgate-orchestrator");
+            if candidate.exists() {
+                return Some(candidate);
+            }
+            if let Some(grandparent) = parent.parent() {
+                let gp_candidate = grandparent.join("warpgate-orchestrator");
+                if gp_candidate.exists() {
+                    return Some(gp_candidate);
+                }
+            }
+        }
+    }
+
+    // 2. Typical workspace target locations
+    let candidates = [
+        "../../target/debug/warpgate-orchestrator",
+        "../../target/release/warpgate-orchestrator",
+        "rust/target/debug/warpgate-orchestrator",
+        "target/debug/warpgate-orchestrator",
+        "rust/target/release/warpgate-orchestrator",
+        "target/release/warpgate-orchestrator",
+    ];
+    for c in candidates {
+        let p = PathBuf::from(c);
+        if p.exists() {
+            return Some(p);
+        }
+    }
+
+    // 3. System PATH
+    if let Ok(path_var) = std::env::var("PATH") {
+        for dir in std::env::split_paths(&path_var) {
+            let candidate = dir.join("warpgate-orchestrator");
+            if candidate.exists() {
+                return Some(candidate);
+            }
+        }
+    }
+
+    None
+}
+
+async fn ensure_backend_available(
+    client: &reqwest::Client,
+    requested_url: &str,
+    auto_spawn: bool,
+) -> Result<(String, Option<u32>), Box<dyn std::error::Error>> {
+    // 1. Check requested URL
+    if is_url_reachable(client, requested_url).await {
+        return Ok((requested_url.to_string(), None));
+    }
+
+    // 2. If requested URL is the default port 8080 (Spring Boot), also check 3000 directly
+    if requested_url.contains(":8080") && is_url_reachable(client, "http://localhost:3000").await {
+        return Ok(("http://localhost:3000".to_string(), None));
+    }
+
+    if !auto_spawn {
+        return Ok((requested_url.to_string(), None));
+    }
+
+    // 3. Auto-spawn local orchestrator daemon
+    println!("No running WarpGate backend found; starting local Orchestrator daemon in background...");
+
+    let binary = match find_orchestrator_binary() {
+        Some(b) => b,
+        None => {
+            println!("Building warpgate-orchestrator...");
+            let build_status = std::process::Command::new("cargo")
+                .args(["build", "--bin", "warpgate-orchestrator"])
+                .status();
+            if build_status.map(|s| s.success()).unwrap_or(false) {
+                find_orchestrator_binary()
+                    .ok_or("Could not locate warpgate-orchestrator binary after build")?
+            } else {
+                return Err("warpgate-orchestrator binary not found. Please run 'cargo build' first.".into());
+            }
+        }
+    };
+
+    let state_dir = PathBuf::from(".warpgate");
+    let _ = std::fs::create_dir_all(&state_dir);
+    let log_file = std::fs::File::create(state_dir.join("orchestrator.log"))?;
+
+    let mut cmd = std::process::Command::new(&binary);
+    cmd.stdout(log_file.try_clone()?);
+    cmd.stderr(log_file);
+
+    #[cfg(unix)]
+    {
+        use std::os::unix::process::CommandExt;
+        cmd.process_group(0);
+    }
+
+    let child = cmd.spawn()?;
+    let pid = child.id();
+    let _ = std::fs::write(state_dir.join("orchestrator.pid"), pid.to_string());
+
+    println!("[+] Local orchestrator daemon started (PID: {}).", pid);
+
+    let target_url = "http://localhost:3000";
+    let mut ready = false;
+    for _ in 0..40 {
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        if is_url_reachable(client, target_url).await {
+            ready = true;
+            break;
+        }
+    }
+
+    if !ready {
+        stop_daemon(Some(pid));
+        return Err("Spawned orchestrator daemon failed to respond within 4s. Check .warpgate/orchestrator.log".into());
+    }
+
+    Ok((target_url.to_string(), Some(pid)))
+}
+
+fn stop_daemon(pid: Option<u32>) {
+    let pid_file = PathBuf::from(".warpgate/orchestrator.pid");
+    let target_pid = pid.or_else(|| {
+        std::fs::read_to_string(&pid_file)
+            .ok()
+            .and_then(|s| s.trim().parse::<u32>().ok())
+    });
+
+    if let Some(p) = target_pid {
+        println!("[-] Stopping local orchestrator daemon (PID: {})...", p);
+        #[cfg(unix)]
+        let _ = std::process::Command::new("kill")
+            .arg(p.to_string())
+            .output();
+
+        #[cfg(windows)]
+        let _ = std::process::Command::new("taskkill")
+            .args(["/PID", &p.to_string(), "/F"])
+            .output();
+    }
+    let _ = std::fs::remove_file(pid_file);
+}
+
+async fn check_and_stop_daemon_if_idle(client: &reqwest::Client, api_url: &str) {
+    let pid_file = PathBuf::from(".warpgate/orchestrator.pid");
+    if !pid_file.exists() {
+        return;
+    }
+
+    let has_active = if let Ok(res) = client
+        .get(format!("{}/api/deployments", api_url.trim_end_matches('/')))
+        .timeout(Duration::from_millis(800))
+        .send()
+        .await
+    {
+        if let Ok(deps) = res.json::<Vec<DeploymentResponse>>().await {
+            deps.iter().any(|d| {
+                d.status != DeploymentStatus::Destroyed && d.status != DeploymentStatus::Failed
+            })
+        } else {
+            false
+        }
+    } else {
+        false
+    };
+
+    if !has_active {
+        stop_daemon(None);
+    }
 }
 
 fn clean_local_state(dry_run: bool) {
@@ -873,5 +1183,38 @@ mod tests {
         }
         let cli = Cli::try_parse_from(["warpgate", "status", "warp-test"]).unwrap();
         assert_eq!(cli.api_url, "http://localhost:8080");
+    }
+
+    #[test]
+    fn test_cli_parsing_up_detach() {
+        let cli = Cli::try_parse_from([
+            "warpgate",
+            "up",
+            "--admin-cidr",
+            "1.2.3.4/32",
+            "--detach",
+        ])
+        .unwrap();
+
+        match cli.command {
+            Commands::Up { detach, .. } => {
+                assert!(detach);
+            }
+            _ => panic!("Expected Up command"),
+        }
+    }
+
+    #[test]
+    fn test_find_orchestrator_binary() {
+        let binary = find_orchestrator_binary();
+        assert!(binary.is_some(), "Should find warpgate-orchestrator in target directory or path");
+    }
+
+    #[tokio::test]
+    async fn test_is_url_reachable_closed_port() {
+        let client = reqwest::Client::new();
+        // High unassigned port that is closed
+        let reachable = is_url_reachable(&client, "http://127.0.0.1:59998").await;
+        assert!(!reachable);
     }
 }

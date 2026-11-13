@@ -47,10 +47,26 @@ async fn main() {
 
 pub fn create_app(state: AppState) -> Router {
     Router::new()
-        .route("/api/deployments", post(create_deployment))
+        .route("/api/deployments/health", get(|| async { StatusCode::OK }))
+        .route(
+            "/api/deployments",
+            post(create_deployment).get(list_deployments),
+        )
         .route("/api/deployments/{id}", get(get_deployment))
         .route("/api/deployments/{id}/teardown", post(teardown_deployment))
         .with_state(state)
+}
+
+async fn list_deployments(
+    State(state): State<AppState>,
+) -> Result<Json<Vec<DeploymentResponse>>, StatusCode> {
+    match state.list_all_deployments() {
+        Ok(list) => Ok(Json(list)),
+        Err(e) => {
+            error!("Failed to list deployments: {}", e);
+            Err(StatusCode::INTERNAL_SERVER_ERROR)
+        }
+    }
 }
 
 async fn notify_webhook(deployment_id: &str, status: &DeploymentStatus, error_message: Option<&str>) {
