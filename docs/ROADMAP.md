@@ -7,7 +7,7 @@
 | **Phase 1** | Infrastructure & Data Plane Proof of Concept | **Completed** | Weeks 1–3 |
 | **Phase 2** | Orchestration, Control Plane & Core Polishing | **Completed** | Weeks 4–6 |
 | **Phase 3** | Resilience, Free-Tier Guardrails & Durable State | **Completed** | Weeks 7–8 |
-| **Phase 4** | Zero-Cost Auth, Virtual Quotas & Multi-Device Networking | **In Progress** | Weeks 9–10 |
+| **Phase 4** | Zero-Cost Auth, Virtual Quotas & Multi-Device Networking | **Completed** | Weeks 9–10 |
 
 ---
 
@@ -69,7 +69,7 @@
 
 ---
 
-## Phase 4: Zero-Cost Auth, Virtual Quotas & Multi-Device Networking (Weeks 9–10) — 🔄 IN PROGRESS
+## Phase 4: Zero-Cost Auth, Virtual Quotas & Multi-Device Networking (Weeks 9–10) — ✅ COMPLETED
 
 - **Week 9: Zero-Cost Identity & Virtual Quota Management**
   - [x] **Embedded JWT Authentication:** Implement JWT user registration and login directly in Spring Boot (`/api/auth/register`, `/api/auth/login`) with zero external SaaS costs.
@@ -77,9 +77,9 @@
   - [x] **Virtual Credit / Time Quota System:** Track monthly usage allowances in PostgreSQL (e.g., 600 free minutes per month per user); deduct minutes on deployment creation without needing paid billing processors like Stripe.
 
 - **Week 10: Dynamic WireGuard Peer Management & Speed Optimization**
-  - [ ] **Multi-Device Support:** Support multiple client devices (laptop + phone + tablet) per gateway node using a dynamic IP pool (`10.200.0.0/24`).
-  - [ ] **Kernel Netlink Peer Injection:** Expose `POST /api/deployments/{id}/peers` to dynamically execute `wg set wg0 peer <KEY> allowed-ips <IP>` at runtime without restarting WireGuard or re-running Ansible playbooks.
-  - [ ] **Packer Pre-baked AMIs:** Build a custom Ubuntu Golden AMI containing WireGuard, BBR tuning, and AdGuard pre-installed, reducing provisioning latency from ~2.5 minutes down to < 30 seconds.
+  - [x] **Multi-Device Support:** Support multiple client devices (laptop + phone + tablet) per gateway node using a dynamic IP pool (`10.200.0.0/24`).
+  - [x] **Kernel Netlink Peer Injection:** Expose `POST /api/deployments/{id}/peers` to dynamically execute `wg set wg0 peer <KEY> allowed-ips <IP>` at runtime without restarting WireGuard or re-running Ansible playbooks.
+  - [x] **Packer Pre-baked AMIs:** Build a custom Ubuntu Golden AMI containing WireGuard, BBR tuning, and AdGuard pre-installed, reducing provisioning latency from ~2.5 minutes down to < 30 seconds.
 
 ---
 
