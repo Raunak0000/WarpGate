@@ -5,6 +5,7 @@
     name: watchdog
     state: present
     update_cache: true
+  when: not (warpgate_prebaked | default(false) | bool)
 
 - name: Enable watchdog kernel support
   become: true

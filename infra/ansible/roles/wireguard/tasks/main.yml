@@ -3,6 +3,7 @@
     name: wireguard
     state: present
     update_cache: yes
+  when: not (warpgate_prebaked | default(false) | bool)
 
 - name: Enable IPv4 forwarding
   sysctl:

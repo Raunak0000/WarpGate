@@ -143,6 +143,18 @@ data "aws_ami" "ubuntu" {
   }
 }
 
+# Optional pre-baked Packer Golden AMI lookup
+data "aws_ami" "warpgate_golden" {
+  count       = var.use_golden_ami && var.golden_ami_id == "" ? 1 : 0
+  most_recent = true
+  owners      = ["self"]
+
+  filter {
+    name   = "name"
+    values = ["warpgate-golden-*"]
+  }
+}
+
 # IAM Role for EC2
 resource "aws_iam_role" "warpgate_ec2_role" {
   name = "${local.name_prefix}-ec2-role"
@@ -186,7 +198,7 @@ resource "aws_iam_instance_profile" "warpgate_profile" {
 
 # EC2 Instance
 resource "aws_instance" "warpgate_node" {
-  ami           = data.aws_ami.ubuntu.id
+  ami           = var.golden_ami_id != "" ? var.golden_ami_id : (var.use_golden_ami ? data.aws_ami.warpgate_golden[0].id : data.aws_ami.ubuntu.id)
   instance_type = "t3.micro"
   subnet_id     = aws_subnet.warpgate_subnet.id
 

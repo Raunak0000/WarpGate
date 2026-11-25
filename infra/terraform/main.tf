@@ -6,4 +6,6 @@ module "vpn_node" {
   admin_cidr     = var.admin_cidr
   ssh_public_key = var.ssh_public_key
   deployment_id  = var.deployment_id
+  use_golden_ami = var.use_golden_ami
+  golden_ami_id  = var.golden_ami_id
 }

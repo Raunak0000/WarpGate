@@ -1,0 +1,84 @@
+---
+- name: Pre-bake WarpGate Golden AMI (Packages, BBR, AdGuard, Watchdog)
+  hosts: all
+  become: true
+
+  tasks:
+    - name: Update apt cache and install WireGuard, Watchdog, and utilities
+      ansible.builtin.apt:
+        name:
+          - wireguard
+          - curl
+          - tar
+          - watchdog
+        state: present
+        update_cache: true
+
+    - name: Enable IPv4 forwarding
+      ansible.posix.sysctl:
+        name: net.ipv4.ip_forward
+        value: "1"
+        sysctl_set: true
+        state: present
+        reload: true
+
+    - name: Enable TCP BBR congestion control
+      ansible.posix.sysctl:
+        name: net.ipv4.tcp_congestion_control
+        value: bbr
+        state: present
+        reload: true
+
+    - name: Set FQ as the default TCP queue discipline
+      ansible.posix.sysctl:
+        name: net.core.default_qdisc
+        value: fq
+        state: present
+        reload: true
+
+    - name: Download AdGuard Home
+      ansible.builtin.get_url:
+        url: https://github.com/AdguardTeam/AdGuardHome/releases/download/v0.107.76/AdGuardHome_linux_amd64.tar.gz
+        dest: /tmp/AdGuardHome_linux_amd64.tar.gz
+        mode: "0644"
+
+    - name: Create AdGuard Home directory
+      ansible.builtin.file:
+        path: /opt/AdGuardHome
+        state: directory
+        mode: "0755"
+
+    - name: Extract AdGuard Home
+      ansible.builtin.unarchive:
+        src: /tmp/AdGuardHome_linux_amd64.tar.gz
+        dest: /opt
+        remote_src: true
+        creates: /opt/AdGuardHome/AdGuardHome
+
+    - name: Install AdGuard Home systemd service
+      ansible.builtin.command:
+        cmd: /opt/AdGuardHome/AdGuardHome -s install
+      args:
+        creates: /etc/systemd/system/AdGuardHome.service
+
+    - name: Enable AdGuard Home service
+      ansible.builtin.systemd:
+        name: AdGuardHome
+        enabled: true
+        daemon_reload: true
+
+    - name: Configure systemd watchdog
+      ansible.builtin.copy:
+        dest: /etc/watchdog.conf
+        mode: "0644"
+        content: |
+          watchdog-device = /dev/watchdog
+          watchdog-timeout = 15
+          max-load-1 = 24
+
+    - name: Enable watchdog service
+      ansible.builtin.systemd:
+        name: watchdog
+        enabled: true
+        daemon_reload: true
+
