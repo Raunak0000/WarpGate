@@ -7,7 +7,7 @@
 | **Phase 1** | Infrastructure & Data Plane Proof of Concept | **Completed** | Weeks 1–3 |
 | **Phase 2** | Orchestration, Control Plane & Core Polishing | **Completed** | Weeks 4–6 |
 | **Phase 3** | Resilience, Free-Tier Guardrails & Durable State | **Completed** | Weeks 7–8 |
-| **Phase 4** | Zero-Cost Auth, Virtual Quotas & Multi-Device Networking | **Upcoming** | Weeks 9–10 |
+| **Phase 4** | Zero-Cost Auth, Virtual Quotas & Multi-Device Networking | **In Progress** | Weeks 9–10 |
 
 ---
 
@@ -69,12 +69,12 @@
 
 ---
 
-## Phase 4: Zero-Cost Auth, Virtual Quotas & Multi-Device Networking (Weeks 9–10) — 📋 UPCOMING
+## Phase 4: Zero-Cost Auth, Virtual Quotas & Multi-Device Networking (Weeks 9–10) — 🔄 IN PROGRESS
 
 - **Week 9: Zero-Cost Identity & Virtual Quota Management**
-  - [ ] **Embedded JWT Authentication:** Implement JWT user registration and login directly in Spring Boot (`/api/auth/register`, `/api/auth/login`) with zero external SaaS costs.
-  - [ ] **CLI Session Management:** Add `warpgate login` command to store authentication tokens securely in `~/.warpgate/credentials.json`.
-  - [ ] **Virtual Credit / Time Quota System:** Track monthly usage allowances in PostgreSQL (e.g., 600 free minutes per month per user); deduct minutes on deployment creation without needing paid billing processors like Stripe.
+  - [x] **Embedded JWT Authentication:** Implement JWT user registration and login directly in Spring Boot (`/api/auth/register`, `/api/auth/login`) with zero external SaaS costs.
+  - [x] **CLI Session Management:** Add `warpgate login` command to store authentication tokens securely in `~/.warpgate/credentials.json`.
+  - [x] **Virtual Credit / Time Quota System:** Track monthly usage allowances in PostgreSQL (e.g., 600 free minutes per month per user); deduct minutes on deployment creation without needing paid billing processors like Stripe.
 
 - **Week 10: Dynamic WireGuard Peer Management & Speed Optimization**
   - [ ] **Multi-Device Support:** Support multiple client devices (laptop + phone + tablet) per gateway node using a dynamic IP pool (`10.200.0.0/24`).
