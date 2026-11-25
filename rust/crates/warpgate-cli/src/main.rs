@@ -99,6 +99,38 @@ enum Commands {
     /// Run system diagnostics and verify environment readiness
     Doctor,
 
+    /// Register a new WarpGate account (includes 600 free monthly minutes)
+    Register {
+        /// Account username
+        #[arg(short, long)]
+        username: Option<String>,
+
+        /// Account email address
+        #[arg(short, long)]
+        email: Option<String>,
+
+        /// Account password (minimum 8 characters)
+        #[arg(short, long)]
+        password: Option<String>,
+    },
+
+    /// Log in to an existing WarpGate account and store session credentials
+    Login {
+        /// Username or email
+        #[arg(short, long)]
+        username: Option<String>,
+
+        /// Account password
+        #[arg(short, long)]
+        password: Option<String>,
+    },
+
+    /// Log out and remove locally stored session credentials
+    Logout,
+
+    /// Display current authenticated user and monthly virtual quota balance
+    Whoami,
+
     /// Generate shell autocompletion scripts (bash, zsh, fish, powershell)
     Completions {
         /// Target shell
@@ -133,6 +165,31 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
         Commands::Doctor => {
             run_doctor_and_welcome(&client, &cli.api_url).await?;
+            return Ok(());
+        }
+
+        Commands::Register {
+            username,
+            email,
+            password,
+        } => {
+            handle_register(&client, &cli.api_url, username, email, password).await?;
+            return Ok(());
+        }
+
+        Commands::Login { username, password } => {
+            handle_login(&client, &cli.api_url, username, password).await?;
+            return Ok(());
+        }
+
+        Commands::Logout => {
+            delete_credentials();
+            println!("Logged out. Local credentials removed from {:?}", get_credentials_path());
+            return Ok(());
+        }
+
+        Commands::Whoami => {
+            handle_whoami(&client, &cli.api_url).await?;
             return Ok(());
         }
 
@@ -186,21 +243,38 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 admin_cidr: Some(resolved_admin_cidr),
             };
 
-            let res = client
-                .post(format!("{}/api/deployments", effective_api_url))
-                .json(&req_body)
-                .send()
-                .await?;
+            let auth_token = load_auth_token();
+            let res = with_auth(
+                client
+                    .post(format!("{}/api/deployments", effective_api_url))
+                    .json(&req_body),
+                auth_token.as_deref(),
+            )
+            .send()
+            .await?;
 
             if !res.status().is_success() {
                 let status_code = res.status();
-                if let Ok(dep) = res.json::<DeploymentResponse>().await {
+                let body_text = res.text().await.unwrap_or_default();
+                if status_code.as_u16() == 401 {
+                    eprintln!(
+                        "Authentication required (HTTP 401). Run 'warpgate login' or 'warpgate register' first."
+                    );
+                    std::process::exit(1);
+                }
+                if let Ok(dep) = serde_json::from_str::<DeploymentResponse>(&body_text) {
                     if let Some(err) = dep.error_message {
                         eprintln!("Failed to submit deployment (HTTP {}): {}", status_code, err);
                         std::process::exit(1);
                     }
                 }
-                eprintln!("Failed to submit deployment: {}", status_code);
+                if let Ok(json_val) = serde_json::from_str::<serde_json::Value>(&body_text) {
+                    if let Some(msg) = json_val.get("message").or_else(|| json_val.get("error")).and_then(|v| v.as_str()) {
+                        eprintln!("Failed to submit deployment (HTTP {}): {}", status_code, msg);
+                        std::process::exit(1);
+                    }
+                }
+                eprintln!("Failed to submit deployment: {} {}", status_code, body_text);
                 std::process::exit(1);
             }
 
@@ -211,10 +285,12 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             loop {
                 tokio::time::sleep(Duration::from_secs(4)).await;
 
-                let status_res = client
-                    .get(format!("{}/api/deployments/{}", effective_api_url, deployment_id))
-                    .send()
-                    .await?;
+                let status_res = with_auth(
+                    client.get(format!("{}/api/deployments/{}", effective_api_url, deployment_id)),
+                    auth_token.as_deref(),
+                )
+                .send()
+                .await?;
 
                 if !status_res.status().is_success() {
                     continue;
@@ -339,11 +415,14 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                             deployment_id: deployment_id.clone(),
                             region: normalized_region.clone(),
                         };
-                        let _ = client
-                            .post(format!("{}/api/deployments/{}/teardown", effective_api_url, deployment_id))
-                            .json(&req_body)
-                            .send()
-                            .await;
+                        let _ = with_auth(
+                            client
+                                .post(format!("{}/api/deployments/{}/teardown", effective_api_url, deployment_id))
+                                .json(&req_body),
+                            auth_token.as_deref(),
+                        )
+                        .send()
+                        .await;
 
                         clear_saved_active_deployment_info();
 
@@ -371,10 +450,12 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                         return Ok(());
                     }
                     _ = tokio::time::sleep(Duration::from_secs(4)) => {
-                        if let Ok(res) = client
-                            .get(format!("{}/api/deployments/{}", effective_api_url, deployment_id))
-                            .send()
-                            .await
+                        if let Ok(res) = with_auth(
+                            client.get(format!("{}/api/deployments/{}", effective_api_url, deployment_id)),
+                            auth_token.as_deref(),
+                        )
+                        .send()
+                        .await
                         {
                             if let Ok(status_dep) = res.json::<DeploymentResponse>().await {
                                 if status_dep.status == DeploymentStatus::Destroyed {
@@ -410,16 +491,19 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         Commands::Status { id } => {
             let (effective_api_url, _) =
                 ensure_backend_available(&client, &cli.api_url, false).await?;
+            let auth_token = load_auth_token();
 
             let target_id = match id {
                 Some(i) => i,
                 None => {
                     if let Some((saved_id, _)) = get_saved_active_deployment_info() {
                         saved_id
-                    } else if let Ok(res) = client
-                        .get(format!("{}/api/deployments", effective_api_url))
-                        .send()
-                        .await
+                    } else if let Ok(res) = with_auth(
+                        client.get(format!("{}/api/deployments", effective_api_url)),
+                        auth_token.as_deref(),
+                    )
+                    .send()
+                    .await
                     {
                         if let Ok(deps) = res.json::<Vec<DeploymentResponse>>().await {
                             if let Some(active) = deps.iter().find(|d| {
@@ -444,11 +528,17 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 }
             };
 
-            let res = client
-                .get(format!("{}/api/deployments/{}", effective_api_url, target_id))
-                .send()
-                .await?;
+            let res = with_auth(
+                client.get(format!("{}/api/deployments/{}", effective_api_url, target_id)),
+                auth_token.as_deref(),
+            )
+            .send()
+            .await?;
 
+            if res.status().as_u16() == 401 {
+                eprintln!("Authentication required (HTTP 401). Run 'warpgate login' first.");
+                std::process::exit(1);
+            }
             if res.status().as_u16() == 404 {
                 print_idle_status_card();
                 return Ok(());
@@ -465,6 +555,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         } => {
             let (effective_api_url, _) =
                 ensure_backend_available(&client, &cli.api_url, false).await?;
+            let auth_token = load_auth_token();
 
             if disconnect {
                 disconnect_local_vpn("warpgate");
@@ -478,10 +569,12 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                     (i, norm)
                 }
                 (Some(i), None) => {
-                    let r = if let Ok(res) = client
-                        .get(format!("{}/api/deployments/{}", effective_api_url, i))
-                        .send()
-                        .await
+                    let r = if let Ok(res) = with_auth(
+                        client.get(format!("{}/api/deployments/{}", effective_api_url, i)),
+                        auth_token.as_deref(),
+                    )
+                    .send()
+                    .await
                     {
                         if let Ok(dep) = res.json::<DeploymentResponse>().await {
                             dep.region
@@ -501,10 +594,12 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 }
                 (None, _) => {
                     let mut found = None;
-                    if let Ok(res) = client
-                        .get(format!("{}/api/deployments", effective_api_url))
-                        .send()
-                        .await
+                    if let Ok(res) = with_auth(
+                        client.get(format!("{}/api/deployments", effective_api_url)),
+                        auth_token.as_deref(),
+                    )
+                    .send()
+                    .await
                     {
                         if let Ok(deps) = res.json::<Vec<DeploymentResponse>>().await {
                             if let Some(active) = deps.iter().find(|d| {
@@ -539,11 +634,14 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 region: target_region,
             };
 
-            let res = client
-                .post(format!("{}/api/deployments/{}/teardown", effective_api_url, target_id))
-                .json(&req_body)
-                .send()
-                .await?;
+            let res = with_auth(
+                client
+                    .post(format!("{}/api/deployments/{}/teardown", effective_api_url, target_id))
+                    .json(&req_body),
+                auth_token.as_deref(),
+            )
+            .send()
+            .await?;
 
             if res.status().is_success() {
                 let teardown: TeardownResponse = res.json().await?;
@@ -558,10 +656,12 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 let _ = std::io::stdout().flush();
                 for _ in 0..60 {
                     tokio::time::sleep(Duration::from_secs(1)).await;
-                    if let Ok(check_res) = client
-                        .get(format!("{}/api/deployments/{}", effective_api_url, target_id))
-                        .send()
-                        .await
+                    if let Ok(check_res) = with_auth(
+                        client.get(format!("{}/api/deployments/{}", effective_api_url, target_id)),
+                        auth_token.as_deref(),
+                    )
+                    .send()
+                    .await
                     {
                         if let Ok(dep) = check_res.json::<DeploymentResponse>().await {
                             if dep.status == DeploymentStatus::Destroyed
@@ -575,6 +675,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                     print!(".");
                     let _ = std::io::stdout().flush();
                 }
+            } else if res.status().as_u16() == 401 {
+                eprintln!("Authentication required (HTTP 401). Run 'warpgate login' first.");
+                std::process::exit(1);
             } else {
                 eprintln!("Teardown request failed: {}", res.status());
             }
@@ -1362,6 +1465,216 @@ pub fn disconnect_local_vpn(conn_name: &str) {
     }
 }
 
+fn with_auth(builder: reqwest::RequestBuilder, token: Option<&str>) -> reqwest::RequestBuilder {
+    match token {
+        Some(t) if !t.trim().is_empty() => builder.bearer_auth(t),
+        _ => builder,
+    }
+}
+
+fn get_credentials_path() -> PathBuf {
+    if let Ok(path) = std::env::var("WARPGATE_CREDENTIALS_FILE") {
+        return PathBuf::from(path);
+    }
+    let home = std::env::var("HOME").unwrap_or_else(|_| ".".to_string());
+    PathBuf::from(home).join(".warpgate").join("credentials.json")
+}
+
+fn save_credentials(api_url: &str, username: &str, token: &str) -> Result<(), String> {
+    let path = get_credentials_path();
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent)
+            .map_err(|e| format!("Failed to create credentials directory: {}", e))?;
+    }
+
+    let payload = serde_json::json!({
+        "api_url": api_url,
+        "username": username,
+        "token": token,
+    });
+    let serialized = serde_json::to_string_pretty(&payload)
+        .map_err(|e| format!("Failed to serialize credentials: {}", e))?;
+
+    std::fs::write(&path, serialized)
+        .map_err(|e| format!("Failed to write credentials to {:?}: {}", path, e))?;
+
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let _ = std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600));
+    }
+
+    Ok(())
+}
+
+fn load_auth_token() -> Option<String> {
+    if let Ok(token) = std::env::var("WARPGATE_TOKEN") {
+        let trimmed = token.trim();
+        if !trimmed.is_empty() {
+            return Some(trimmed.to_string());
+        }
+    }
+
+    let path = get_credentials_path();
+    let content = std::fs::read_to_string(path).ok()?;
+    let json: serde_json::Value = serde_json::from_str(&content).ok()?;
+    json.get("token")
+        .and_then(|v| v.as_str())
+        .map(|s| s.to_string())
+        .filter(|s| !s.is_empty())
+}
+
+fn delete_credentials() {
+    let path = get_credentials_path();
+    if path.exists() {
+        let _ = std::fs::remove_file(path);
+    }
+}
+
+fn prompt_input(label: &str) -> Result<String, Box<dyn std::error::Error>> {
+    use std::io::Write;
+    print!("{}", label);
+    std::io::stdout().flush()?;
+    let mut input = String::new();
+    std::io::stdin().read_line(&mut input)?;
+    Ok(input.trim().to_string())
+}
+
+async fn handle_register(
+    client: &reqwest::Client,
+    api_url: &str,
+    username: Option<String>,
+    email: Option<String>,
+    password: Option<String>,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let username = match username {
+        Some(u) => u,
+        None => prompt_input("Username: ")?,
+    };
+    let email = match email {
+        Some(e) => e,
+        None => prompt_input("Email: ")?,
+    };
+    let password = match password {
+        Some(p) => p,
+        None => prompt_input("Password (min 8 chars): ")?,
+    };
+
+    let res = client
+        .post(format!("{}/api/auth/register", api_url.trim_end_matches('/')))
+        .json(&serde_json::json!({
+            "username": username,
+            "email": email,
+            "password": password,
+        }))
+        .send()
+        .await?;
+
+    if !res.status().is_success() {
+        let status = res.status();
+        let body = res.text().await.unwrap_or_default();
+        eprintln!("Registration failed (HTTP {}): {}", status, body);
+        std::process::exit(1);
+    }
+
+    let body: serde_json::Value = res.json().await?;
+    let token = body.get("token").and_then(|v| v.as_str()).unwrap_or("");
+    let saved_user = body.get("username").and_then(|v| v.as_str()).unwrap_or(&username);
+    let remaining = body.get("remaining_quota_minutes").and_then(|v| v.as_i64()).unwrap_or(600);
+    let monthly = body.get("monthly_quota_minutes").and_then(|v| v.as_i64()).unwrap_or(600);
+
+    save_credentials(api_url, saved_user, token)?;
+    println!("Registered and logged in as '{}'!", saved_user);
+    println!("Virtual Quota: {}/{} minutes remaining this month.", remaining, monthly);
+    println!("Credentials saved to {:?}", get_credentials_path());
+    Ok(())
+}
+
+async fn handle_login(
+    client: &reqwest::Client,
+    api_url: &str,
+    username: Option<String>,
+    password: Option<String>,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let username = match username {
+        Some(u) => u,
+        None => prompt_input("Username or email: ")?,
+    };
+    let password = match password {
+        Some(p) => p,
+        None => prompt_input("Password: ")?,
+    };
+
+    let res = client
+        .post(format!("{}/api/auth/login", api_url.trim_end_matches('/')))
+        .json(&serde_json::json!({
+            "username": username,
+            "password": password,
+        }))
+        .send()
+        .await?;
+
+    if !res.status().is_success() {
+        let status = res.status();
+        let body = res.text().await.unwrap_or_default();
+        eprintln!("Login failed (HTTP {}): {}", status, body);
+        std::process::exit(1);
+    }
+
+    let body: serde_json::Value = res.json().await?;
+    let token = body.get("token").and_then(|v| v.as_str()).unwrap_or("");
+    let saved_user = body.get("username").and_then(|v| v.as_str()).unwrap_or(&username);
+    let remaining = body.get("remaining_quota_minutes").and_then(|v| v.as_i64()).unwrap_or(0);
+    let monthly = body.get("monthly_quota_minutes").and_then(|v| v.as_i64()).unwrap_or(600);
+
+    save_credentials(api_url, saved_user, token)?;
+    println!("Logged in as '{}'!", saved_user);
+    println!("Virtual Quota: {}/{} minutes remaining this month.", remaining, monthly);
+    println!("Credentials saved to {:?}", get_credentials_path());
+    Ok(())
+}
+
+async fn handle_whoami(
+    client: &reqwest::Client,
+    api_url: &str,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let Some(token) = load_auth_token() else {
+        eprintln!("Not logged in. Run 'warpgate login' or 'warpgate register' first.");
+        std::process::exit(1);
+    };
+
+    let res = with_auth(
+        client.get(format!("{}/api/auth/me", api_url.trim_end_matches('/'))),
+        Some(&token),
+    )
+    .send()
+    .await?;
+
+    if !res.status().is_success() {
+        let status = res.status();
+        if status.as_u16() == 401 {
+            eprintln!("Session expired or invalid. Run 'warpgate login' to refresh.");
+        } else {
+            eprintln!("Failed to fetch profile (HTTP {})", status);
+        }
+        std::process::exit(1);
+    }
+
+    let profile: serde_json::Value = res.json().await?;
+    let username = profile.get("username").and_then(|v| v.as_str()).unwrap_or("-");
+    let email = profile.get("email").and_then(|v| v.as_str()).unwrap_or("-");
+    let remaining = profile.get("remaining_quota_minutes").and_then(|v| v.as_i64()).unwrap_or(0);
+    let monthly = profile.get("monthly_quota_minutes").and_then(|v| v.as_i64()).unwrap_or(600);
+    let reset_at = profile.get("quota_reset_at").and_then(|v| v.as_str()).unwrap_or("-");
+
+    println!("===========================================================");
+    println!(" User          : {} ({})", username, email);
+    println!(" Virtual Quota : {}/{} minutes remaining", remaining, monthly);
+    println!(" Quota Resets  : {}", reset_at);
+    println!("===========================================================");
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1631,5 +1944,61 @@ mod tests {
         // High unassigned port that is closed
         let reachable = is_url_reachable(&client, "http://127.0.0.1:59998").await;
         assert!(!reachable);
+    }
+
+    #[test]
+    fn test_cli_parsing_auth_commands() {
+        let reg = Cli::try_parse_from([
+            "warpgate",
+            "register",
+            "--username",
+            "alice",
+            "--email",
+            "alice@example.com",
+            "--password",
+            "secretpass123",
+        ])
+        .unwrap();
+        assert!(matches!(reg.command, Some(Commands::Register { .. })));
+
+        let login = Cli::try_parse_from([
+            "warpgate",
+            "login",
+            "--username",
+            "alice",
+            "--password",
+            "secretpass123",
+        ])
+        .unwrap();
+        assert!(matches!(login.command, Some(Commands::Login { .. })));
+
+        let logout = Cli::try_parse_from(["warpgate", "logout"]).unwrap();
+        assert!(matches!(logout.command, Some(Commands::Logout)));
+
+        let whoami = Cli::try_parse_from(["warpgate", "whoami"]).unwrap();
+        assert!(matches!(whoami.command, Some(Commands::Whoami)));
+    }
+
+    #[test]
+    fn test_credentials_save_load_delete() {
+        let tmp_dir = std::env::temp_dir().join(format!("warpgate-cred-test-{}", uuid_short()));
+        let cred_file = tmp_dir.join("credentials.json");
+        unsafe {
+            std::env::set_var("WARPGATE_CREDENTIALS_FILE", &cred_file);
+            std::env::remove_var("WARPGATE_TOKEN");
+        }
+
+        save_credentials("http://localhost:8080", "alice", "jwt-abc-123").unwrap();
+        assert!(cred_file.exists());
+        assert_eq!(load_auth_token().as_deref(), Some("jwt-abc-123"));
+
+        delete_credentials();
+        assert!(!cred_file.exists());
+        assert!(load_auth_token().is_none());
+
+        unsafe {
+            std::env::remove_var("WARPGATE_CREDENTIALS_FILE");
+        }
+        let _ = std::fs::remove_dir_all(tmp_dir);
     }
 }
