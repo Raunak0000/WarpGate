@@ -195,14 +195,26 @@ pub async fn run_apply(deployment_id: &str, region: &str, admin_cidr: &str) -> R
         return Err(format!("Terraform init failed: {}", status));
     }
 
-    let status = terraform_command()
-        .arg("apply")
+    let mut cmd = terraform_command();
+    cmd.arg("apply")
         .arg("-auto-approve")
         .arg("-input=false")
         .arg(format!("-var=deployment_id={}", deployment_id))
         .arg(format!("-var=aws_region={}", region))
         .arg(format!("-var=admin_cidr={}", admin_cidr))
-        .arg(format!("-var=ssh_public_key={}", ssh_public_key))
+        .arg(format!("-var=ssh_public_key={}", ssh_public_key));
+
+    if std::env::var("WARPGATE_GOLDEN_AMI").as_deref() == Ok("1") {
+        cmd.arg("-var=use_golden_ami=true");
+    }
+    if let Ok(ami_id) = std::env::var("WARPGATE_AMI_ID") {
+        let trimmed = ami_id.trim();
+        if !trimmed.is_empty() {
+            cmd.arg(format!("-var=golden_ami_id={}", trimmed));
+        }
+    }
+
+    let status = cmd
         .current_dir(&tf_dir)
         .stdout(Stdio::inherit())
         .stderr(Stdio::inherit())

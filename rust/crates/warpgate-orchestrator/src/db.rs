@@ -1,8 +1,9 @@
 use rusqlite::{params, Connection, OptionalExtension};
+use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 use std::time::{SystemTime, UNIX_EPOCH};
-use warpgate_common::{DeploymentResponse, DeploymentStatus};
+use warpgate_common::{DeploymentResponse, DeploymentStatus, PeerInfo};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RecoverableDeployment {
@@ -102,7 +103,18 @@ impl DbStore {
                  expires_at INTEGER NOT NULL,
                  is_dry_run INTEGER NOT NULL DEFAULT 0
              );
-             CREATE INDEX IF NOT EXISTS idx_deployments_status ON deployments(status);",
+             CREATE INDEX IF NOT EXISTS idx_deployments_status ON deployments(status);
+             CREATE TABLE IF NOT EXISTS peers (
+                 id INTEGER PRIMARY KEY AUTOINCREMENT,
+                 deployment_id TEXT NOT NULL,
+                 device_name TEXT NOT NULL,
+                 public_key TEXT NOT NULL,
+                 assigned_ip TEXT NOT NULL,
+                 created_at INTEGER NOT NULL,
+                 UNIQUE(deployment_id, public_key),
+                 UNIQUE(deployment_id, assigned_ip)
+             );
+             CREATE INDEX IF NOT EXISTS idx_peers_deployment ON peers(deployment_id);",
         )
         .map_err(|e| format!("Failed to initialize database tables: {}", e))?;
         Ok(())
@@ -346,6 +358,146 @@ impl DbStore {
 
         Ok(result)
     }
+
+    pub fn insert_primary_peer(
+        &self,
+        deployment_id: &str,
+        public_key: &str,
+    ) -> Result<(), String> {
+        let now = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_secs() as i64;
+        let conn = self.conn.lock().map_err(|e| e.to_string())?;
+        conn.execute(
+            "INSERT OR IGNORE INTO peers (deployment_id, device_name, public_key, assigned_ip, created_at)
+             VALUES (?1, 'primary', ?2, '10.200.0.2/32', ?3)",
+            params![deployment_id, public_key, now],
+        )
+        .map_err(|e| format!("Failed to insert primary peer for {}: {}", deployment_id, e))?;
+        Ok(())
+    }
+
+    pub fn allocate_and_insert_peer(
+        &self,
+        deployment_id: &str,
+        device_name: &str,
+        public_key: &str,
+    ) -> Result<String, String> {
+        let now = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_secs() as i64;
+        let conn = self.conn.lock().map_err(|e| e.to_string())?;
+
+        let existing_key: Option<String> = conn
+            .query_row(
+                "SELECT assigned_ip FROM peers WHERE deployment_id = ?1 AND public_key = ?2",
+                params![deployment_id, public_key],
+                |row| row.get(0),
+            )
+            .optional()
+            .map_err(|e| e.to_string())?;
+        if existing_key.is_some() {
+            return Err("Peer with this public key is already registered on this deployment".to_string());
+        }
+
+        let mut stmt = conn
+            .prepare("SELECT assigned_ip FROM peers WHERE deployment_id = ?1")
+            .map_err(|e| e.to_string())?;
+        let rows = stmt
+            .query_map(params![deployment_id], |row| row.get::<_, String>(0))
+            .map_err(|e| e.to_string())?;
+
+        let mut used_ips = HashSet::new();
+        used_ips.insert("10.200.0.1/32".to_string());
+        used_ips.insert("10.200.0.2/32".to_string());
+        for row in rows {
+            used_ips.insert(row.map_err(|e| e.to_string())?);
+        }
+        drop(stmt);
+
+        let mut chosen_ip = None;
+        for host_octet in 3..=254u8 {
+            let candidate = format!("10.200.0.{}/32", host_octet);
+            if !used_ips.contains(&candidate) {
+                chosen_ip = Some(candidate);
+                break;
+            }
+        }
+
+        let assigned_ip = chosen_ip.ok_or_else(|| {
+            "WireGuard subnet IP pool (10.200.0.0/24) is exhausted for this deployment".to_string()
+        })?;
+
+        conn.execute(
+            "INSERT INTO peers (deployment_id, device_name, public_key, assigned_ip, created_at)
+             VALUES (?1, ?2, ?3, ?4, ?5)",
+            params![deployment_id, device_name, public_key, assigned_ip, now],
+        )
+        .map_err(|e| format!("Failed to register peer: {}", e))?;
+
+        Ok(assigned_ip)
+    }
+
+    pub fn list_peers(&self, deployment_id: &str) -> Result<Vec<PeerInfo>, String> {
+        let dep = self
+            .get_deployment(deployment_id)?
+            .ok_or_else(|| format!("Deployment '{}' not found", deployment_id))?;
+
+        let conn = self.conn.lock().map_err(|e| e.to_string())?;
+        let mut stmt = conn
+            .prepare(
+                "SELECT deployment_id, device_name, public_key, assigned_ip
+                 FROM peers WHERE deployment_id = ?1 ORDER BY id ASC",
+            )
+            .map_err(|e| e.to_string())?;
+
+        let rows = stmt
+            .query_map(params![deployment_id], |row| {
+                Ok(PeerInfo {
+                    deployment_id: row.get(0)?,
+                    device_name: row.get(1)?,
+                    public_key: row.get(2)?,
+                    assigned_ip: row.get(3)?,
+                    server_ip: dep.server_ip.clone(),
+                    wireguard_port: dep.wireguard_port,
+                    server_public_key: dep.server_public_key.clone(),
+                    dns_server: dep.dns_server.clone(),
+                })
+            })
+            .map_err(|e| e.to_string())?;
+
+        let mut peers = Vec::new();
+        for r in rows {
+            peers.push(r.map_err(|e| e.to_string())?);
+        }
+        Ok(peers)
+    }
+
+    pub fn remove_peer(&self, deployment_id: &str, public_key: &str) -> Result<bool, String> {
+        let conn = self.conn.lock().map_err(|e| e.to_string())?;
+        let affected = conn
+            .execute(
+                "DELETE FROM peers WHERE deployment_id = ?1 AND public_key = ?2",
+                params![deployment_id, public_key],
+            )
+            .map_err(|e| format!("Failed to remove peer: {}", e))?;
+        Ok(affected > 0)
+    }
+
+    pub fn is_deployment_dry_run(&self, deployment_id: &str) -> Result<bool, String> {
+        let conn = self.conn.lock().map_err(|e| e.to_string())?;
+        let flag: Option<i64> = conn
+            .query_row(
+                "SELECT is_dry_run FROM deployments WHERE deployment_id = ?1",
+                params![deployment_id],
+                |row| row.get(0),
+            )
+            .optional()
+            .map_err(|e| e.to_string())?;
+        Ok(flag == Some(1))
+    }
 }
 
 #[cfg(test)]
@@ -439,6 +591,75 @@ mod tests {
         assert_eq!(list[0].deployment_id, "warp-000000000002");
         assert!(list[0].is_dry_run);
         assert_eq!(list[0].ttl_minutes, 60);
+    }
+
+    #[test]
+    fn test_peer_pool_allocation_and_removal() {
+        let db = DbStore::open_in_memory().unwrap();
+        let resp = DeploymentResponse {
+            deployment_id: "warp-000000000003".to_string(),
+            status: DeploymentStatus::Ready,
+            server_ip: Some("54.10.20.30".to_string()),
+            wireguard_port: Some(51820),
+            server_public_key: Some("M0pTVJqVNONA94wmPZCeNGDnEKSDXvu+yXEqtvqpp1I=".to_string()),
+            client_ip: Some("10.200.0.2/32".to_string()),
+            dns_server: Some("1.1.1.1, 10.200.0.1".to_string()),
+            error_message: None,
+            region: "us-east-1".to_string(),
+            admin_cidr: "0.0.0.0/0".to_string(),
+        };
+        db.insert_deployment(&resp, 30, true).unwrap();
+        db.insert_primary_peer("warp-000000000003", "primaryPubKey0000000000000000000000000000000=")
+            .unwrap();
+
+        let ip1 = db
+            .allocate_and_insert_peer(
+                "warp-000000000003",
+                "phone",
+                "phonePubKey00000000000000000000000000000000=",
+            )
+            .unwrap();
+        assert_eq!(ip1, "10.200.0.3/32");
+
+        let ip2 = db
+            .allocate_and_insert_peer(
+                "warp-000000000003",
+                "tablet",
+                "tabletPubKey0000000000000000000000000000000=",
+            )
+            .unwrap();
+        assert_eq!(ip2, "10.200.0.4/32");
+
+        // Duplicate public key rejected
+        assert!(db
+            .allocate_and_insert_peer(
+                "warp-000000000003",
+                "phone-dup",
+                "phonePubKey00000000000000000000000000000000=",
+            )
+            .is_err());
+
+        let peers = db.list_peers("warp-000000000003").unwrap();
+        assert_eq!(peers.len(), 3);
+        assert_eq!(peers[0].assigned_ip, "10.200.0.2/32");
+        assert_eq!(peers[1].device_name, "phone");
+        assert_eq!(peers[2].device_name, "tablet");
+
+        // Removing .3 frees it for reuse
+        assert!(db
+            .remove_peer(
+                "warp-000000000003",
+                "phonePubKey00000000000000000000000000000000="
+            )
+            .unwrap());
+        let ip_reused = db
+            .allocate_and_insert_peer(
+                "warp-000000000003",
+                "laptop-2",
+                "laptop2PubKey000000000000000000000000000000=",
+            )
+            .unwrap();
+        assert_eq!(ip_reused, "10.200.0.3/32");
     }
 }
 

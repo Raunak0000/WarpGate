@@ -66,6 +66,12 @@ pub async fn run_playbook(public_ip: &str, client_public_key: &str) -> Result<()
         .arg("-e")
         .arg(format!("wireguard_client_public_key={}", client_public_key));
 
+    if std::env::var("WARPGATE_GOLDEN_AMI").as_deref() == Ok("1")
+        || std::env::var("WARPGATE_AMI_ID").is_ok_and(|v| !v.trim().is_empty())
+    {
+        cmd.arg("-e").arg("warpgate_prebaked=true");
+    }
+
     if std::path::Path::new(&warpgate_key).exists() {
         cmd.arg("--private-key").arg(&warpgate_key);
     }
@@ -129,4 +135,80 @@ pub async fn get_server_public_key(public_ip: &str) -> Result<String, String> {
     }
 
     Ok(key)
+}
+
+fn build_ssh_command(public_ip: &str, remote_cmd: &str) -> Command {
+    let warpgate_key = std::env::var("WARPGATE_SSH_KEY").unwrap_or_else(|_| {
+        let home = std::env::var("HOME").unwrap_or_default();
+        format!("{}/.ssh/warpgate_key", home)
+    });
+
+    let mut cmd = Command::new("ssh");
+    cmd.arg("-o")
+        .arg("BatchMode=yes")
+        .arg("-o")
+        .arg("StrictHostKeyChecking=accept-new")
+        .arg("-o")
+        .arg("ConnectTimeout=10");
+
+    if std::path::Path::new(&warpgate_key).exists() {
+        cmd.arg("-i").arg(&warpgate_key);
+    }
+
+    cmd.arg(format!("ubuntu@{}", public_ip)).arg(remote_cmd);
+    cmd
+}
+
+/// Dynamically injects a WireGuard peer into the running wg0 interface via netlink (`wg set`).
+pub async fn add_wireguard_peer(
+    public_ip: &str,
+    client_public_key: &str,
+    allowed_ip: &str,
+) -> Result<(), String> {
+    warpgate_common::validate_wireguard_public_key(client_public_key)?;
+    let remote_cmd = format!(
+        "sudo wg set wg0 peer {} allowed-ips {} && sudo sh -c 'wg-quick save wg0 || true'",
+        client_public_key.trim(),
+        allowed_ip.trim()
+    );
+    let output = build_ssh_command(public_ip, &remote_cmd)
+        .output()
+        .await
+        .map_err(|e| format!("Failed to execute SSH for wg set: {}", e))?;
+
+    if !output.status.success() {
+        return Err(format!(
+            "Failed to add WireGuard peer: {}",
+            String::from_utf8_lossy(&output.stderr)
+        ));
+    }
+
+    info!("Injected WireGuard peer {} ({}) on {}", client_public_key, allowed_ip, public_ip);
+    Ok(())
+}
+
+/// Dynamically removes a WireGuard peer from the running wg0 interface via netlink (`wg set`).
+pub async fn remove_wireguard_peer(
+    public_ip: &str,
+    client_public_key: &str,
+) -> Result<(), String> {
+    warpgate_common::validate_wireguard_public_key(client_public_key)?;
+    let remote_cmd = format!(
+        "sudo wg set wg0 peer {} remove && sudo sh -c 'wg-quick save wg0 || true'",
+        client_public_key.trim()
+    );
+    let output = build_ssh_command(public_ip, &remote_cmd)
+        .output()
+        .await
+        .map_err(|e| format!("Failed to execute SSH for wg remove: {}", e))?;
+
+    if !output.status.success() {
+        return Err(format!(
+            "Failed to remove WireGuard peer: {}",
+            String::from_utf8_lossy(&output.stderr)
+        ));
+    }
+
+    info!("Removed WireGuard peer {} from {}", client_public_key, public_ip);
+    Ok(())
 }

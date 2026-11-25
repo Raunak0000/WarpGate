@@ -15,7 +15,8 @@ use std::time::Duration;
 use tracing::{error, info, warn};
 use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt};
 use warpgate_common::{
-    DeploymentRequest, DeploymentResponse, DeploymentStatus, TeardownRequest, TeardownResponse,
+    AddPeerRequest, DeploymentRequest, DeploymentResponse, DeploymentStatus, PeerInfo,
+    RemovePeerRequest, TeardownRequest, TeardownResponse,
 };
 
 pub type AppState = Arc<DbStore>;
@@ -54,6 +55,10 @@ pub fn create_app(state: AppState) -> Router {
         )
         .route("/api/deployments/{id}", get(get_deployment))
         .route("/api/deployments/{id}/teardown", post(teardown_deployment))
+        .route(
+            "/api/deployments/{id}/peers",
+            post(add_peer).get(list_peers).delete(remove_peer),
+        )
         .with_state(state)
 }
 
@@ -220,6 +225,8 @@ async fn create_deployment(
     let is_dry_run = std::env::var("WARPGATE_DRY_RUN").as_deref() == Ok("1");
     if let Err(e) = state.insert_deployment(&initial_response, payload.ttl_minutes, is_dry_run) {
         error!("Failed to persist deployment {}: {}", deployment_id, e);
+    } else if let Err(e) = state.insert_primary_peer(&deployment_id, &payload.client_public_key) {
+        error!("Failed to persist primary peer for {}: {}", deployment_id, e);
     }
 
     notify_webhook(&deployment_id, &DeploymentStatus::ProvisioningInfra, None).await;
@@ -504,6 +511,178 @@ async fn teardown_deployment(
         status: DeploymentStatus::Terminating,
         message: "Teardown initiated".to_string(),
     }))
+}
+
+async fn add_peer(
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+    Json(payload): Json<AddPeerRequest>,
+) -> Result<(StatusCode, Json<PeerInfo>), (StatusCode, Json<serde_json::Value>)> {
+    if let Err(err) = warpgate_common::validate_wireguard_public_key(&payload.public_key) {
+        return Err((
+            StatusCode::BAD_REQUEST,
+            Json(serde_json::json!({ "error": err })),
+        ));
+    }
+
+    let device_name = payload.device_name.trim();
+    if device_name.is_empty() {
+        return Err((
+            StatusCode::BAD_REQUEST,
+            Json(serde_json::json!({ "error": "device_name cannot be empty" })),
+        ));
+    }
+
+    let dep = match state.get_deployment(&id) {
+        Ok(Some(d)) => d,
+        Ok(None) => {
+            return Err((
+                StatusCode::NOT_FOUND,
+                Json(serde_json::json!({ "error": format!("Deployment '{}' not found", id) })),
+            ))
+        }
+        Err(e) => {
+            return Err((
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(serde_json::json!({ "error": e })),
+            ))
+        }
+    };
+
+    if dep.status != DeploymentStatus::Ready {
+        return Err((
+            StatusCode::CONFLICT,
+            Json(serde_json::json!({
+                "error": format!("Deployment '{}' must be READY before adding peers (current: {:?})", id, dep.status)
+            })),
+        ));
+    }
+
+    let public_key = payload.public_key.trim().to_string();
+    let assigned_ip = match state.allocate_and_insert_peer(&id, device_name, &public_key) {
+        Ok(ip) => ip,
+        Err(e) => {
+            let status = if e.contains("already registered") {
+                StatusCode::CONFLICT
+            } else {
+                StatusCode::BAD_REQUEST
+            };
+            return Err((status, Json(serde_json::json!({ "error": e }))));
+        }
+    };
+
+    let is_dry_run = std::env::var("WARPGATE_DRY_RUN").as_deref() == Ok("1")
+        || state.is_deployment_dry_run(&id).unwrap_or(false);
+
+    if !is_dry_run {
+        let Some(server_ip) = dep.server_ip.as_deref() else {
+            let _ = state.remove_peer(&id, &public_key);
+            return Err((
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(serde_json::json!({ "error": "Deployment has no server_ip assigned" })),
+            ));
+        };
+        if let Err(e) = ansible::add_wireguard_peer(server_ip, &public_key, &assigned_ip).await {
+            let _ = state.remove_peer(&id, &public_key);
+            return Err((
+                StatusCode::BAD_GATEWAY,
+                Json(serde_json::json!({ "error": e })),
+            ));
+        }
+    } else {
+        info!(
+            "DRY RUN: simulated wg set wg0 peer {} allowed-ips {} on {}",
+            public_key, assigned_ip, id
+        );
+    }
+
+    Ok((
+        StatusCode::CREATED,
+        Json(PeerInfo {
+            deployment_id: id,
+            device_name: device_name.to_string(),
+            public_key,
+            assigned_ip,
+            server_ip: dep.server_ip,
+            wireguard_port: dep.wireguard_port,
+            server_public_key: dep.server_public_key,
+            dns_server: dep.dns_server,
+        }),
+    ))
+}
+
+async fn list_peers(
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+) -> Result<Json<Vec<PeerInfo>>, StatusCode> {
+    match state.list_peers(&id) {
+        Ok(peers) => Ok(Json(peers)),
+        Err(e) if e.contains("not found") => Err(StatusCode::NOT_FOUND),
+        Err(e) => {
+            error!("Failed to list peers for {}: {}", id, e);
+            Err(StatusCode::INTERNAL_SERVER_ERROR)
+        }
+    }
+}
+
+async fn remove_peer(
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+    Json(payload): Json<RemovePeerRequest>,
+) -> Result<Json<serde_json::Value>, (StatusCode, Json<serde_json::Value>)> {
+    if let Err(err) = warpgate_common::validate_wireguard_public_key(&payload.public_key) {
+        return Err((
+            StatusCode::BAD_REQUEST,
+            Json(serde_json::json!({ "error": err })),
+        ));
+    }
+
+    let dep = match state.get_deployment(&id) {
+        Ok(Some(d)) => d,
+        Ok(None) => {
+            return Err((
+                StatusCode::NOT_FOUND,
+                Json(serde_json::json!({ "error": format!("Deployment '{}' not found", id) })),
+            ))
+        }
+        Err(e) => {
+            return Err((
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(serde_json::json!({ "error": e })),
+            ))
+        }
+    };
+
+    let public_key = payload.public_key.trim();
+    let is_dry_run = std::env::var("WARPGATE_DRY_RUN").as_deref() == Ok("1")
+        || state.is_deployment_dry_run(&id).unwrap_or(false);
+
+    if !is_dry_run && dep.status == DeploymentStatus::Ready {
+        if let Some(server_ip) = dep.server_ip.as_deref() {
+            if let Err(e) = ansible::remove_wireguard_peer(server_ip, public_key).await {
+                return Err((
+                    StatusCode::BAD_GATEWAY,
+                    Json(serde_json::json!({ "error": e })),
+                ));
+            }
+        }
+    }
+
+    match state.remove_peer(&id, public_key) {
+        Ok(true) => Ok(Json(serde_json::json!({
+            "deployment_id": id,
+            "public_key": public_key,
+            "status": "REMOVED"
+        }))),
+        Ok(false) => Err((
+            StatusCode::NOT_FOUND,
+            Json(serde_json::json!({ "error": "Peer not found on this deployment" })),
+        )),
+        Err(e) => Err((
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(serde_json::json!({ "error": e })),
+        )),
+    }
 }
 
 /// Recovers in-flight or interrupted deployments on orchestrator startup.
@@ -1050,5 +1229,125 @@ mod tests {
         // future deployment remains Ready
         let recovered_future = state.get_deployment("warp-future-1").unwrap().unwrap();
         assert_eq!(recovered_future.status, DeploymentStatus::Ready);
+    }
+
+    #[tokio::test]
+    async fn test_add_list_remove_peers() {
+        let state = create_test_state();
+        let dep = create_test_deployment("warp-peer-1", DeploymentStatus::Ready);
+        state.insert_deployment(&dep, 30, true).unwrap();
+        state
+            .insert_primary_peer(
+                "warp-peer-1",
+                "xI1sB28L/a8k5u1e8w1V9/z6y3u3u5l2p5x3h4v4wHE=",
+            )
+            .unwrap();
+
+        let app = create_app(state);
+
+        // 1. Add second device (phone)
+        let add_payload = serde_json::to_vec(&AddPeerRequest {
+            device_name: "pixel-phone".to_string(),
+            public_key: "M0pTVJqVNONA94wmPZCeNGDnEKSDXvu+yXEqtvqpp1I=".to_string(),
+        })
+        .unwrap();
+
+        let add_res = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/deployments/warp-peer-1/peers")
+                    .header("content-type", "application/json")
+                    .body(Body::from(add_payload))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(add_res.status(), StatusCode::CREATED);
+        let add_bytes = add_res.into_body().collect().await.unwrap().to_bytes();
+        let peer_info: PeerInfo = serde_json::from_slice(&add_bytes).unwrap();
+        assert_eq!(peer_info.device_name, "pixel-phone");
+        assert_eq!(peer_info.assigned_ip, "10.200.0.3/32");
+
+        // 2. List peers
+        let list_res = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("GET")
+                    .uri("/api/deployments/warp-peer-1/peers")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(list_res.status(), StatusCode::OK);
+        let list_bytes = list_res.into_body().collect().await.unwrap().to_bytes();
+        let peers: Vec<PeerInfo> = serde_json::from_slice(&list_bytes).unwrap();
+        assert_eq!(peers.len(), 2);
+
+        // 3. Remove second device
+        let del_payload = serde_json::to_vec(&RemovePeerRequest {
+            public_key: "M0pTVJqVNONA94wmPZCeNGDnEKSDXvu+yXEqtvqpp1I=".to_string(),
+        })
+        .unwrap();
+        let del_res = app
+            .oneshot(
+                Request::builder()
+                    .method("DELETE")
+                    .uri("/api/deployments/warp-peer-1/peers")
+                    .header("content-type", "application/json")
+                    .body(Body::from(del_payload))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(del_res.status(), StatusCode::OK);
+    }
+
+    #[tokio::test]
+    async fn test_add_peer_invalid_key_and_non_ready() {
+        let state = create_test_state();
+        let dep = create_test_deployment("warp-peer-2", DeploymentStatus::ProvisioningInfra);
+        state.insert_deployment(&dep, 30, true).unwrap();
+        let app = create_app(state);
+
+        let bad_key = serde_json::to_vec(&AddPeerRequest {
+            device_name: "bad".to_string(),
+            public_key: "invalid;rm -rf /".to_string(),
+        })
+        .unwrap();
+        let bad_res = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/deployments/warp-peer-2/peers")
+                    .header("content-type", "application/json")
+                    .body(Body::from(bad_key))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(bad_res.status(), StatusCode::BAD_REQUEST);
+
+        let valid_key = serde_json::to_vec(&AddPeerRequest {
+            device_name: "tablet".to_string(),
+            public_key: "M0pTVJqVNONA94wmPZCeNGDnEKSDXvu+yXEqtvqpp1I=".to_string(),
+        })
+        .unwrap();
+        let conflict_res = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/deployments/warp-peer-2/peers")
+                    .header("content-type", "application/json")
+                    .body(Body::from(valid_key))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(conflict_res.status(), StatusCode::CONFLICT);
     }
 }

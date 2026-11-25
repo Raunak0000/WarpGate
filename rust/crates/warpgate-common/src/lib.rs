@@ -48,6 +48,47 @@ pub struct TeardownResponse {
     pub message: String,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AddPeerRequest {
+    pub device_name: String,
+    pub public_key: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct RemovePeerRequest {
+    pub public_key: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct PeerInfo {
+    pub deployment_id: String,
+    pub device_name: String,
+    pub public_key: String,
+    pub assigned_ip: String,
+    pub server_ip: Option<String>,
+    pub wireguard_port: Option<u16>,
+    pub server_public_key: Option<String>,
+    pub dns_server: Option<String>,
+}
+
+/// Validates that a WireGuard public key is a 44-character standard base64 string.
+pub fn validate_wireguard_public_key(key: &str) -> Result<(), String> {
+    let trimmed = key.trim();
+    let bytes = trimmed.as_bytes();
+    let valid = bytes.len() == 44
+        && bytes[43] == b'='
+        && bytes[..43]
+            .iter()
+            .all(|b| b.is_ascii_alphanumeric() || *b == b'+' || *b == b'/');
+    if !valid {
+        return Err(
+            "Invalid WireGuard public key format (expected 44-character base64 Curve25519 key)"
+                .to_string(),
+        );
+    }
+    Ok(())
+}
+
 pub const SUPPORTED_REGIONS: &[&str] = &[
     "us-east-1",
     "us-east-2",
@@ -251,6 +292,31 @@ mod tests {
     fn test_normalize_region_invalid() {
         assert!(normalize_region("invalid-region").is_err());
         assert!(normalize_region("mars-central-1").is_err());
+    }
+
+    #[test]
+    fn test_validate_wireguard_public_key() {
+        assert!(validate_wireguard_public_key("xI1sB28L/a8k5u1e8w1V9/z6y3u3u5l2p5x3h4v4wHE=").is_ok());
+        assert!(validate_wireguard_public_key("bad-key").is_err());
+        assert!(validate_wireguard_public_key("xI1sB28L/a8k5u1e8w1V9/z6y3u3u5l2p5x3h4v4wH;rm -rf /").is_err());
+    }
+
+    #[test]
+    fn test_peer_info_roundtrip() {
+        let peer = PeerInfo {
+            deployment_id: "warp-abc".to_string(),
+            device_name: "pixel-phone".to_string(),
+            public_key: "xI1sB28L/a8k5u1e8w1V9/z6y3u3u5l2p5x3h4v4wHE=".to_string(),
+            assigned_ip: "10.200.0.3/32".to_string(),
+            server_ip: Some("54.123.45.67".to_string()),
+            wireguard_port: Some(51820),
+            server_public_key: Some("M0pTVJqVNONA94wmPZCeNGDnEKSDXvu+yXEqtvqpp1I=".to_string()),
+            dns_server: Some("1.1.1.1, 10.200.0.1".to_string()),
+        };
+
+        let json = serde_json::to_string(&peer).unwrap();
+        let parsed: PeerInfo = serde_json::from_str(&json).unwrap();
+        assert_eq!(parsed, peer);
     }
 }
 
