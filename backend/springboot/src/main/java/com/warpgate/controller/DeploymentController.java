@@ -4,6 +4,7 @@ import java.util.List;
 
 import org.springframework.http.HttpStatus;
 import org.springframework.http.ResponseEntity;
+import org.springframework.web.bind.annotation.DeleteMapping;
 import org.springframework.web.bind.annotation.GetMapping;
 import org.springframework.web.bind.annotation.PathVariable;
 import org.springframework.web.bind.annotation.PostMapping;
@@ -71,5 +72,27 @@ public class DeploymentController {
 
         deploymentService.updateDeploymentFromWebhook(id, payload);
         return ResponseEntity.ok().build();
+    }
+
+    @PostMapping("/{id}/peers")
+    public ResponseEntity<JsonNode> addPeer(
+            @PathVariable String id,
+            @RequestBody JsonNode payload) {
+
+        return ResponseEntity.status(HttpStatus.CREATED)
+                .body(deploymentService.addPeer(id, payload));
+    }
+
+    @GetMapping("/{id}/peers")
+    public ResponseEntity<JsonNode> listPeers(@PathVariable String id) {
+        return ResponseEntity.ok(deploymentService.listPeers(id));
+    }
+
+    @DeleteMapping("/{id}/peers")
+    public ResponseEntity<JsonNode> removePeer(
+            @PathVariable String id,
+            @RequestBody JsonNode payload) {
+
+        return ResponseEntity.ok(deploymentService.removePeer(id, payload));
     }
 }

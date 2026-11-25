@@ -4,8 +4,10 @@ import java.time.LocalDateTime;
 import java.util.List;
 
 import org.springframework.beans.factory.annotation.Value;
+import org.springframework.http.HttpMethod;
 import org.springframework.http.HttpStatus;
 import org.springframework.stereotype.Service;
+import org.springframework.web.client.HttpStatusCodeException;
 import org.springframework.web.client.RestClient;
 import org.springframework.web.client.RestClientException;
 
@@ -152,6 +154,77 @@ public class DeploymentService {
                 dep.setStatus(status);
                 deploymentRepository.save(dep);
             });
+        }
+    }
+
+    public JsonNode addPeer(String id, JsonNode payload) {
+        try {
+            JsonNode response = orchestratorClient.post()
+                    .uri("/api/deployments/{id}/peers", id)
+                    .body(payload)
+                    .retrieve()
+                    .body(JsonNode.class);
+            if (response == null) {
+                throw new IllegalStateException("Rust orchestrator returned an empty response");
+            }
+            return response;
+        } catch (HttpStatusCodeException exception) {
+            throw new org.springframework.web.server.ResponseStatusException(
+                    exception.getStatusCode(),
+                    exception.getResponseBodyAsString(),
+                    exception);
+        } catch (RestClientException exception) {
+            throw new org.springframework.web.server.ResponseStatusException(
+                    HttpStatus.BAD_GATEWAY,
+                    "Failed to add peer on the Rust orchestrator",
+                    exception);
+        }
+    }
+
+    public JsonNode listPeers(String id) {
+        try {
+            JsonNode response = orchestratorClient.get()
+                    .uri("/api/deployments/{id}/peers", id)
+                    .retrieve()
+                    .body(JsonNode.class);
+            if (response == null) {
+                throw new IllegalStateException("Rust orchestrator returned an empty response");
+            }
+            return response;
+        } catch (HttpStatusCodeException exception) {
+            throw new org.springframework.web.server.ResponseStatusException(
+                    exception.getStatusCode(),
+                    exception.getResponseBodyAsString(),
+                    exception);
+        } catch (RestClientException exception) {
+            throw new org.springframework.web.server.ResponseStatusException(
+                    HttpStatus.BAD_GATEWAY,
+                    "Failed to list peers from the Rust orchestrator",
+                    exception);
+        }
+    }
+
+    public JsonNode removePeer(String id, JsonNode payload) {
+        try {
+            JsonNode response = orchestratorClient.method(HttpMethod.DELETE)
+                    .uri("/api/deployments/{id}/peers", id)
+                    .body(payload)
+                    .retrieve()
+                    .body(JsonNode.class);
+            if (response == null) {
+                throw new IllegalStateException("Rust orchestrator returned an empty response");
+            }
+            return response;
+        } catch (HttpStatusCodeException exception) {
+            throw new org.springframework.web.server.ResponseStatusException(
+                    exception.getStatusCode(),
+                    exception.getResponseBodyAsString(),
+                    exception);
+        } catch (RestClientException exception) {
+            throw new org.springframework.web.server.ResponseStatusException(
+                    HttpStatus.BAD_GATEWAY,
+                    "Failed to remove peer from the Rust orchestrator",
+                    exception);
         }
     }
 }

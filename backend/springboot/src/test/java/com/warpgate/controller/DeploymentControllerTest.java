@@ -25,6 +25,7 @@ import com.warpgate.service.JwtService;
 
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.eq;
+import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.delete;
 import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.get;
 import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.post;
 import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.jsonPath;
@@ -196,5 +197,51 @@ public class DeploymentControllerTest {
                 .andExpect(status().isOk())
                 .andExpect(jsonPath("$.status").value("TERMINATING"))
                 .andExpect(jsonPath("$.message").value("Teardown initiated"));
+    }
+
+    @Test
+    void testAddListAndRemovePeers() throws Exception {
+        ObjectNode peerResponse = objectMapper.createObjectNode();
+        peerResponse.put("deployment_id", "warp-test-1");
+        peerResponse.put("device_name", "pixel-phone");
+        peerResponse.put("assigned_ip", "10.200.0.3/32");
+
+        Mockito.when(deploymentService.addPeer(eq("warp-test-1"), any()))
+                .thenReturn(peerResponse);
+
+        ObjectNode addPayload = objectMapper.createObjectNode();
+        addPayload.put("device_name", "pixel-phone");
+        addPayload.put("public_key", "M0pTVJqVNONA94wmPZCeNGDnEKSDXvu+yXEqtvqpp1I=");
+
+        mockMvc.perform(post("/api/deployments/warp-test-1/peers")
+                .header(HttpHeaders.AUTHORIZATION, TEST_AUTH_HEADER)
+                .contentType(MediaType.APPLICATION_JSON)
+                .content(objectMapper.writeValueAsString(addPayload)))
+                .andExpect(status().isCreated())
+                .andExpect(jsonPath("$.assigned_ip").value("10.200.0.3/32"))
+                .andExpect(jsonPath("$.device_name").value("pixel-phone"));
+
+        Mockito.when(deploymentService.listPeers("warp-test-1"))
+                .thenReturn(objectMapper.createArrayNode().add(peerResponse));
+
+        mockMvc.perform(get("/api/deployments/warp-test-1/peers")
+                .header(HttpHeaders.AUTHORIZATION, TEST_AUTH_HEADER))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$[0].device_name").value("pixel-phone"));
+
+        ObjectNode removeResponse = objectMapper.createObjectNode();
+        removeResponse.put("status", "REMOVED");
+        Mockito.when(deploymentService.removePeer(eq("warp-test-1"), any()))
+                .thenReturn(removeResponse);
+
+        ObjectNode delPayload = objectMapper.createObjectNode();
+        delPayload.put("public_key", "M0pTVJqVNONA94wmPZCeNGDnEKSDXvu+yXEqtvqpp1I=");
+
+        mockMvc.perform(delete("/api/deployments/warp-test-1/peers")
+                .header(HttpHeaders.AUTHORIZATION, TEST_AUTH_HEADER)
+                .contentType(MediaType.APPLICATION_JSON)
+                .content(objectMapper.writeValueAsString(delPayload)))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.status").value("REMOVED"));
     }
 }
