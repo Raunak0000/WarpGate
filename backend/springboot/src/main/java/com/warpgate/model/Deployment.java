@@ -14,6 +14,9 @@ public class Deployment {
     @Column(name = "deployment_id")
     private String deploymentId;
 
+    @Column(name = "owner_username")
+    private String ownerUsername;
+
     @Column(nullable = false)
     private String region;
 
@@ -60,6 +63,14 @@ public class Deployment {
 
     public void setDeploymentId(String deploymentId) {
         this.deploymentId = deploymentId;
+    }
+
+    public String getOwnerUsername() {
+        return ownerUsername;
+    }
+
+    public void setOwnerUsername(String ownerUsername) {
+        this.ownerUsername = ownerUsername;
     }
 
     public String getRegion() {

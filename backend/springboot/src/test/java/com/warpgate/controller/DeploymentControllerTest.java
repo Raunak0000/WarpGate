@@ -2,12 +2,15 @@ package com.warpgate.controller;
 
 import java.time.LocalDateTime;
 import java.util.List;
+import java.util.Optional;
 
+import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.mockito.Mockito;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.boot.test.autoconfigure.web.servlet.WebMvcTest;
 import org.springframework.boot.test.mock.mockito.MockBean;
+import org.springframework.http.HttpHeaders;
 import org.springframework.http.HttpStatus;
 import org.springframework.http.MediaType;
 import org.springframework.test.web.servlet.MockMvc;
@@ -18,6 +21,7 @@ import com.fasterxml.jackson.databind.node.ObjectNode;
 import com.warpgate.dto.DeploymentRequest;
 import com.warpgate.model.Deployment;
 import com.warpgate.service.DeploymentService;
+import com.warpgate.service.JwtService;
 
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.eq;
@@ -29,6 +33,8 @@ import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.
 @WebMvcTest(DeploymentController.class)
 public class DeploymentControllerTest {
 
+    private static final String TEST_AUTH_HEADER = "Bearer test-jwt-token";
+
     @Autowired
     private MockMvc mockMvc;
 
@@ -37,6 +43,30 @@ public class DeploymentControllerTest {
 
     @MockBean
     private DeploymentService deploymentService;
+
+    @MockBean
+    private JwtService jwtService;
+
+    @BeforeEach
+    void setupAuth() {
+        Mockito.when(jwtService.validateAndExtractUsername("test-jwt-token"))
+                .thenReturn(Optional.of("alice"));
+    }
+
+    @Test
+    void testCreateDeploymentRequiresAuth() throws Exception {
+        DeploymentRequest request = new DeploymentRequest();
+        request.setDeploymentId("warp-unauth");
+        request.setRegion("us-east-1");
+        request.setTtlMinutes(30);
+        request.setClientPublicKey("dummyPublicKey=");
+        request.setAdminCidr("0.0.0.0/0");
+
+        mockMvc.perform(post("/api/deployments")
+                .contentType(MediaType.APPLICATION_JSON)
+                .content(objectMapper.writeValueAsString(request)))
+                .andExpect(status().isUnauthorized());
+    }
 
     @Test
     void testCreateDeploymentSuccess() throws Exception {
@@ -51,10 +81,11 @@ public class DeploymentControllerTest {
         responseNode.put("deployment_id", "warp-test-1");
         responseNode.put("status", "PROVISIONING_INFRA");
 
-        Mockito.when(deploymentService.createDeployment(any(DeploymentRequest.class)))
+        Mockito.when(deploymentService.createDeployment(any(DeploymentRequest.class), eq("alice")))
                 .thenReturn(responseNode);
 
         mockMvc.perform(post("/api/deployments")
+                .header(HttpHeaders.AUTHORIZATION, TEST_AUTH_HEADER)
                 .contentType(MediaType.APPLICATION_JSON)
                 .content(objectMapper.writeValueAsString(request)))
                 .andExpect(status().isAccepted())
@@ -68,6 +99,7 @@ public class DeploymentControllerTest {
         // Missing required fields
 
         mockMvc.perform(post("/api/deployments")
+                .header(HttpHeaders.AUTHORIZATION, TEST_AUTH_HEADER)
                 .contentType(MediaType.APPLICATION_JSON)
                 .content(objectMapper.writeValueAsString(invalidRequest)))
                 .andExpect(status().isBadRequest());
@@ -83,13 +115,14 @@ public class DeploymentControllerTest {
         exceedRequest.setAdminCidr("0.0.0.0/0");
 
         mockMvc.perform(post("/api/deployments")
+                .header(HttpHeaders.AUTHORIZATION, TEST_AUTH_HEADER)
                 .contentType(MediaType.APPLICATION_JSON)
                 .content(objectMapper.writeValueAsString(exceedRequest)))
                 .andExpect(status().isBadRequest());
     }
 
     @Test
-    void testReceiveWebhookSuccess() throws Exception {
+    void testReceiveWebhookSuccessWithoutAuth() throws Exception {
         ObjectNode webhookPayload = objectMapper.createObjectNode();
         webhookPayload.put("status", "READY");
 
@@ -110,7 +143,8 @@ public class DeploymentControllerTest {
         Mockito.when(deploymentService.getDeployment("warp-test-1"))
                 .thenReturn(responseNode);
 
-        mockMvc.perform(get("/api/deployments/warp-test-1"))
+        mockMvc.perform(get("/api/deployments/warp-test-1")
+                .header(HttpHeaders.AUTHORIZATION, TEST_AUTH_HEADER))
                 .andExpect(status().isOk())
                 .andExpect(jsonPath("$.deployment_id").value("warp-test-1"))
                 .andExpect(jsonPath("$.status").value("READY"));
@@ -121,7 +155,8 @@ public class DeploymentControllerTest {
         Mockito.when(deploymentService.getDeployment("nonexistent"))
                 .thenThrow(new ResponseStatusException(HttpStatus.BAD_GATEWAY, "Failed"));
 
-        mockMvc.perform(get("/api/deployments/nonexistent"))
+        mockMvc.perform(get("/api/deployments/nonexistent")
+                .header(HttpHeaders.AUTHORIZATION, TEST_AUTH_HEADER))
                 .andExpect(status().isBadGateway());
     }
 
@@ -132,7 +167,8 @@ public class DeploymentControllerTest {
         Mockito.when(deploymentService.getAllDeployments())
                 .thenReturn(List.of(d1));
 
-        mockMvc.perform(get("/api/deployments"))
+        mockMvc.perform(get("/api/deployments")
+                .header(HttpHeaders.AUTHORIZATION, TEST_AUTH_HEADER))
                 .andExpect(status().isOk())
                 .andExpect(jsonPath("$[0].deploymentId").value("warp-1"))
                 .andExpect(jsonPath("$[0].region").value("us-east-1"))
@@ -154,6 +190,7 @@ public class DeploymentControllerTest {
                 .thenReturn(responseNode);
 
         mockMvc.perform(post("/api/deployments/warp-test-1/teardown")
+                .header(HttpHeaders.AUTHORIZATION, TEST_AUTH_HEADER)
                 .contentType(MediaType.APPLICATION_JSON)
                 .content(objectMapper.writeValueAsString(payload)))
                 .andExpect(status().isOk())

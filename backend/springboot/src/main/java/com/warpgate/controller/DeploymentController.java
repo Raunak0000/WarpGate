@@ -12,10 +12,12 @@ import org.springframework.web.bind.annotation.RequestMapping;
 import org.springframework.web.bind.annotation.RestController;
 
 import com.fasterxml.jackson.databind.JsonNode;
+import com.warpgate.config.JwtAuthInterceptor;
 import com.warpgate.dto.DeploymentRequest;
 import com.warpgate.model.Deployment;
 import com.warpgate.service.DeploymentService;
 
+import jakarta.servlet.http.HttpServletRequest;
 import jakarta.validation.Valid;
 
 @RestController
@@ -30,9 +32,12 @@ public class DeploymentController {
 
     @PostMapping
     public ResponseEntity<JsonNode> createDeployment(
-            @Valid @RequestBody DeploymentRequest request) {
+            @Valid @RequestBody DeploymentRequest request,
+            HttpServletRequest httpRequest) {
 
-        JsonNode response = deploymentService.createDeployment(request);
+        Object attr = httpRequest.getAttribute(JwtAuthInterceptor.AUTHENTICATED_USER_ATTR);
+        String username = attr instanceof String s ? s : null;
+        JsonNode response = deploymentService.createDeployment(request, username);
 
         return ResponseEntity.status(HttpStatus.ACCEPTED).body(response);
     }

@@ -18,19 +18,28 @@ import com.warpgate.repository.DeploymentRepository;
 public class DeploymentService {
 
     private final DeploymentRepository deploymentRepository;
+    private final AuthService authService;
     private final RestClient orchestratorClient;
 
     public DeploymentService(
             DeploymentRepository deploymentRepository,
+            AuthService authService,
             RestClient.Builder restClientBuilder,
             @Value("${warpgate.orchestrator.base-url}") String orchestratorUrl) {
 
         this.deploymentRepository = deploymentRepository;
+        this.authService = authService;
         this.orchestratorClient =
                 restClientBuilder.baseUrl(orchestratorUrl).build();
     }
 
     public JsonNode createDeployment(DeploymentRequest request) {
+        return createDeployment(request, null);
+    }
+
+    public JsonNode createDeployment(DeploymentRequest request, String ownerUsername) {
+        authService.deductQuota(ownerUsername, request.getTtlMinutes());
+
         LocalDateTime createdAt = LocalDateTime.now();
         LocalDateTime expiresAt =
                 createdAt.plusMinutes(request.getTtlMinutes());
@@ -42,6 +51,7 @@ public class DeploymentService {
                 request.getTtlMinutes(),
                 createdAt,
                 expiresAt);
+        deployment.setOwnerUsername(ownerUsername);
 
         deploymentRepository.save(deployment);
 
@@ -60,6 +70,7 @@ public class DeploymentService {
             return response;
 
         } catch (RestClientException exception) {
+            authService.refundQuota(ownerUsername, request.getTtlMinutes());
             deployment.setStatus("FAILED");
             deploymentRepository.save(deployment);
 
