@@ -5,7 +5,8 @@ use qrcode::render::unicode;
 use std::path::PathBuf;
 use std::time::Duration;
 use warpgate_common::{
-    DeploymentRequest, DeploymentResponse, DeploymentStatus, TeardownRequest, TeardownResponse,
+    AddPeerRequest, DeploymentRequest, DeploymentResponse, DeploymentStatus, PeerInfo,
+    RemovePeerRequest, TeardownRequest, TeardownResponse,
 };
 use x25519_dalek::{PublicKey, StaticSecret};
 
@@ -131,6 +132,12 @@ enum Commands {
     /// Display current authenticated user and monthly virtual quota balance
     Whoami,
 
+    /// Manage multi-device WireGuard peers on an active gateway
+    Peer {
+        #[command(subcommand)]
+        action: PeerCommands,
+    },
+
     /// Generate shell autocompletion scripts (bash, zsh, fish, powershell)
     Completions {
         /// Target shell
@@ -144,6 +151,45 @@ enum Commands {
         /// Port to listen on
         #[arg(short, long, default_value_t = 3000)]
         port: u16,
+    },
+}
+
+#[derive(Subcommand)]
+enum PeerCommands {
+    /// Add a new device (phone, tablet, laptop) to an active gateway via kernel netlink
+    Add {
+        /// Deployment ID (auto-detected if omitted)
+        #[arg(short, long)]
+        id: Option<String>,
+
+        /// Friendly device name (e.g. 'pixel-phone', 'ipad')
+        #[arg(short, long, default_value = "device")]
+        name: String,
+
+        /// Existing WireGuard public key (generates a fresh keypair + QR code if omitted)
+        #[arg(short, long)]
+        public_key: Option<String>,
+
+        /// Save generated device WireGuard config to this file
+        #[arg(short, long)]
+        output: Option<PathBuf>,
+    },
+
+    /// List all devices registered on an active gateway
+    List {
+        /// Deployment ID (auto-detected if omitted)
+        #[arg(short, long)]
+        id: Option<String>,
+    },
+
+    /// Remove a device peer from an active gateway
+    Remove {
+        /// WireGuard public key of the peer to remove
+        public_key: String,
+
+        /// Deployment ID (auto-detected if omitted)
+        #[arg(short, long)]
+        id: Option<String>,
     },
 }
 
@@ -190,6 +236,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
         Commands::Whoami => {
             handle_whoami(&client, &cli.api_url).await?;
+            return Ok(());
+        }
+
+        Commands::Peer { action } => {
+            handle_peer_command(&client, &cli.api_url, action).await?;
             return Ok(());
         }
 
@@ -1675,6 +1726,186 @@ async fn handle_whoami(
     Ok(())
 }
 
+async fn resolve_active_deployment_id(
+    client: &reqwest::Client,
+    effective_api_url: &str,
+    auth_token: Option<&str>,
+    explicit_id: Option<String>,
+) -> Result<String, Box<dyn std::error::Error>> {
+    if let Some(id) = explicit_id {
+        return Ok(id);
+    }
+    if let Some((saved_id, _)) = get_saved_active_deployment_info() {
+        return Ok(saved_id);
+    }
+    if let Ok(res) = with_auth(
+        client.get(format!("{}/api/deployments", effective_api_url)),
+        auth_token,
+    )
+    .send()
+    .await
+    {
+        if let Ok(deps) = res.json::<Vec<DeploymentResponse>>().await {
+            if let Some(active) = deps.iter().find(|d| d.status == DeploymentStatus::Ready) {
+                return Ok(active.deployment_id.clone());
+            }
+        }
+    }
+    Err("No active READY deployment found. Pass --id <deployment-id> explicitly.".into())
+}
+
+async fn handle_peer_command(
+    client: &reqwest::Client,
+    api_url: &str,
+    action: PeerCommands,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let (effective_api_url, _) = ensure_backend_available(client, api_url, false).await?;
+    let auth_token = load_auth_token();
+
+    match action {
+        PeerCommands::Add {
+            id,
+            name,
+            public_key,
+            output,
+        } => {
+            let target_id =
+                resolve_active_deployment_id(client, &effective_api_url, auth_token.as_deref(), id)
+                    .await?;
+
+            let (generated_priv, pub_key) = match public_key {
+                Some(k) => (None, k),
+                None => {
+                    let (priv_k, pub_k) = generate_wireguard_keypair();
+                    (Some(priv_k), pub_k)
+                }
+            };
+
+            let req_body = AddPeerRequest {
+                device_name: name,
+                public_key: pub_key,
+            };
+
+            let res = with_auth(
+                client
+                    .post(format!(
+                        "{}/api/deployments/{}/peers",
+                        effective_api_url, target_id
+                    ))
+                    .json(&req_body),
+                auth_token.as_deref(),
+            )
+            .send()
+            .await?;
+
+            if !res.status().is_success() {
+                let status = res.status();
+                let body = res.text().await.unwrap_or_default();
+                eprintln!("Failed to add peer (HTTP {}): {}", status, body);
+                std::process::exit(1);
+            }
+
+            let peer: PeerInfo = res.json().await?;
+            println!("\nPeer '{}' added to deployment '{}'!", peer.device_name, peer.deployment_id);
+            println!("Assigned Tunnel IP : {}", peer.assigned_ip);
+            println!("Peer Public Key    : {}", peer.public_key);
+
+            if let Some(priv_key) = generated_priv {
+                let server_ip = peer.server_ip.as_deref().unwrap_or("0.0.0.0");
+                let port = peer.wireguard_port.unwrap_or(51820);
+                let server_pub = peer.server_public_key.as_deref().unwrap_or("");
+                let dns = peer.dns_server.as_deref().unwrap_or("1.1.1.1, 10.200.0.1");
+
+                let conf = generate_wireguard_config(
+                    &priv_key,
+                    &peer.assigned_ip,
+                    dns,
+                    server_pub,
+                    server_ip,
+                    port,
+                );
+
+                println!("\nScan with WireGuard Mobile App ({}):\n", peer.device_name);
+                if let Ok(code) = QrCode::new(conf.as_bytes()) {
+                    let qr_string = code
+                        .render::<unicode::Dense1x2>()
+                        .dark_color(unicode::Dense1x2::Light)
+                        .light_color(unicode::Dense1x2::Dark)
+                        .build();
+                    println!("{qr_string}");
+                }
+
+                if let Some(path) = output {
+                    std::fs::write(&path, &conf)?;
+                    println!("Device config saved to {:?}", path);
+                }
+            }
+        }
+        PeerCommands::List { id } => {
+            let target_id =
+                resolve_active_deployment_id(client, &effective_api_url, auth_token.as_deref(), id)
+                    .await?;
+
+            let res = with_auth(
+                client.get(format!(
+                    "{}/api/deployments/{}/peers",
+                    effective_api_url, target_id
+                )),
+                auth_token.as_deref(),
+            )
+            .send()
+            .await?;
+
+            if !res.status().is_success() {
+                let status = res.status();
+                let body = res.text().await.unwrap_or_default();
+                eprintln!("Failed to list peers (HTTP {}): {}", status, body);
+                std::process::exit(1);
+            }
+
+            let peers: Vec<PeerInfo> = res.json().await?;
+            println!("=========================================================================");
+            println!(" Peers for Deployment: {}", target_id);
+            println!("=========================================================================");
+            for p in peers {
+                println!(
+                    "  {:<14} | {:<15} | {}",
+                    p.device_name, p.assigned_ip, p.public_key
+                );
+            }
+            println!("=========================================================================");
+        }
+        PeerCommands::Remove { public_key, id } => {
+            let target_id =
+                resolve_active_deployment_id(client, &effective_api_url, auth_token.as_deref(), id)
+                    .await?;
+
+            let res = with_auth(
+                client
+                    .delete(format!(
+                        "{}/api/deployments/{}/peers",
+                        effective_api_url, target_id
+                    ))
+                    .json(&RemovePeerRequest { public_key }),
+                auth_token.as_deref(),
+            )
+            .send()
+            .await?;
+
+            if !res.status().is_success() {
+                let status = res.status();
+                let body = res.text().await.unwrap_or_default();
+                eprintln!("Failed to remove peer (HTTP {}): {}", status, body);
+                std::process::exit(1);
+            }
+
+            println!("Peer removed dynamically from '{}'.", target_id);
+        }
+    }
+
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -2000,5 +2231,57 @@ mod tests {
             std::env::remove_var("WARPGATE_CREDENTIALS_FILE");
         }
         let _ = std::fs::remove_dir_all(tmp_dir);
+    }
+
+    #[test]
+    fn test_cli_parsing_peer_commands() {
+        let add_cmd = Cli::try_parse_from([
+            "warpgate",
+            "peer",
+            "add",
+            "--id",
+            "warp-1234567890ab",
+            "--name",
+            "pixel-phone",
+        ])
+        .unwrap();
+        match add_cmd.command.unwrap() {
+            Commands::Peer {
+                action:
+                    PeerCommands::Add {
+                        id,
+                        name,
+                        public_key,
+                        ..
+                    },
+            } => {
+                assert_eq!(id.as_deref(), Some("warp-1234567890ab"));
+                assert_eq!(name, "pixel-phone");
+                assert!(public_key.is_none());
+            }
+            _ => panic!("Expected Peer Add command"),
+        }
+
+        let list_cmd = Cli::try_parse_from(["warpgate", "peer", "list"]).unwrap();
+        assert!(matches!(
+            list_cmd.command,
+            Some(Commands::Peer {
+                action: PeerCommands::List { .. }
+            })
+        ));
+
+        let rm_cmd = Cli::try_parse_from([
+            "warpgate",
+            "peer",
+            "remove",
+            "M0pTVJqVNONA94wmPZCeNGDnEKSDXvu+yXEqtvqpp1I=",
+        ])
+        .unwrap();
+        assert!(matches!(
+            rm_cmd.command,
+            Some(Commands::Peer {
+                action: PeerCommands::Remove { .. }
+            })
+        ));
     }
 }
